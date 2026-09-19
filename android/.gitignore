@@ -1,0 +1,13 @@
+*.iml
+.gradle/
+build/
+local.properties
+.idea/
+.DS_Store
+/captures
+.externalNativeBuild
+app/src/main/assets/bin/
+app/src/main/assets/*.tar.gz
+app/src/main/assets/web/xterm.js
+app/src/main/assets/web/xterm.css
+app/src/main/assets/web/fit.js

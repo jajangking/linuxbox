@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LinuxBox</title>
+<link rel="stylesheet" href="xterm.css">
+<style>
+  html, body, #term { height: 100%; margin: 0; background: #0b0e14; }
+  #term { padding: 6px; }
+</style>
+</head>
+<body>
+<div id="term"></div>
+<script src="xterm.js"></script>
+<script src="fit.js"></script>
+<script>
+  const term = new Terminal({
+    cursorBlink: true,
+    fontFamily: 'monospace',
+    fontSize: 14,
+    theme: { background: '#0b0e14' }
+  });
+  term.open(document.getElementById('term'));
+  const fit = new FitAddon.FitAddon();
+  term.loadAddon(fit);
+  fit.fit();
+
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const ws = new WebSocket(proto + '//' + location.host + '/ws');
+
+  ws.onmessage = (e) => term.write(e.data);
+  ws.onclose = () => term.write('\r\n[web terminal terputus]\r\n');
+  ws.onerror = () => term.write('\r\n[kesalahan web socket]\r\n');
+  term.onData((d) => { if (ws.readyState === WebSocket.OPEN) ws.send(d); });
+
+  window.addEventListener('resize', () => fit.fit());
+</script>
+</body>
+</html>

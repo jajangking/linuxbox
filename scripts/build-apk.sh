@@ -1,0 +1,116 @@
+#!/bin/bash
+# build-apk.sh — bangun & pasang LinuxBox di Termux tanpa Android Studio/Gradle.
+# Pipeline: proot/rootfs/xterm.js dari Termux -> compile C (NDK cross) ->
+#           javac + commons-compress -> d8 -> aapt2 -> apksigner -> adb install.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+SRC="$ROOT/android/app/src/main"
+MANIFEST="$ROOT/android/app/src/main/AndroidManifest.xml"
+WORK="$ROOT/out"
+GEN="$WORK/gen"
+ASSETS="$WORK/assets"
+DISTRO="${DISTRO:-alpine}"
+XTERM_VER="${XTERM_VER:-6.0.0}"
+FIT_VER="${FIT_VER:-0.11.0}"
+ANDROID_JAR="${ANDROID_JAR:-$HOME/androidjar/android-13/android.jar}"
+AAPT_FRAMEWORK="${AAPT_FRAMEWORK:-/system/framework/framework-res.apk}"
+CC_TARGET="${CC_TARGET:-aarch64-linux-android35}"
+DEX_API="${DEX_API:-26}"
+COMMONS_URL="${COMMONS_URL:-https://repo1.maven.org/maven2/org/apache/commons/commons-compress/1.26.2/commons-compress-1.26.2.jar}"
+COMMONS_IO_URL="${COMMONS_IO_URL:-https://repo1.maven.org/maven2/commons-io/commons-io/2.16.1/commons-io-2.16.1.jar}"
+
+cmds=(javac jar d8 aapt2 apksigner adb curl keytool clang tar sha256sum)
+for c in "${cmds[@]}"; do command -v "$c" >/dev/null || { echo "butuh: $c" >&2; exit 1; }; done
+
+rm -rf "$WORK"; mkdir -p "$GEN" "$ASSETS/bin" "$ASSETS/web" "$WORK/dex" "$WORK/libs"
+
+echo "[1] proot binary + libs"
+command -v proot >/dev/null || pkg install -y proot
+cp "$(command -v proot)" "$ASSETS/bin/proot"
+chmod 755 "$ASSETS/bin/proot"
+# proot (Termux) butuh libtalloc + libandroid-shmem; bundle biar jalan di app sandbox
+for lib in "$PREFIX"/lib/libtalloc.so.2* "$PREFIX"/lib/libandroid-shmem.so; do
+    [ -e "$lib" ] && cp "$lib" "$ASSETS/bin/"
+done
+
+echo "[2] ptylauncher (cross Android $CC_TARGET)"
+clang --target="$CC_TARGET" -O2 -o "$ASSETS/bin/ptylauncher" "$SRC/cpp/ptylauncher.c"
+
+echo "[3] rootfs ($DISTRO)"
+if [ -d "$PREFIX/var/lib/proot-distro/containers/$DISTRO/rootfs" ]; then
+    ROOTFS_SRC="$PREFIX/var/lib/proot-distro/containers/$DISTRO/rootfs"
+elif [ -d "$PREFIX/var/lib/proot-distro/installed-rootfs/$DISTRO" ]; then
+    ROOTFS_SRC="$PREFIX/var/lib/proot-distro/installed-rootfs/$DISTRO"
+else
+    command -v proot-distro >/dev/null || pkg install -y proot-distro
+    proot-distro install "$DISTRO" || true
+    if [ -d "$PREFIX/var/lib/proot-distro/containers/$DISTRO/rootfs" ]; then
+        ROOTFS_SRC="$PREFIX/var/lib/proot-distro/containers/$DISTRO/rootfs"
+    else
+        ROOTFS_SRC="$PREFIX/var/lib/proot-distro/installed-rootfs/$DISTRO"
+    fi
+fi
+[ -d "$ROOTFS_SRC" ] || { echo "rootfs tidak ketemu di $ROOTFS_SRC" >&2; exit 1; }
+tar -C "$ROOTFS_SRC" -czf "$ASSETS/rootfs.tar.gz" .
+SHA=$(sha256sum "$ASSETS/rootfs.tar.gz" | cut -d' ' -f1)
+SIZE=$(stat -c%s "$ASSETS/rootfs.tar.gz")
+
+echo "[4] web assets (xterm.js)"
+curl -fsSL -o "$ASSETS/web/xterm.js"  "https://cdn.jsdelivr.net/npm/@xterm/xterm@$XTERM_VER/lib/xterm.js"
+curl -fsSL -o "$ASSETS/web/xterm.css" "https://cdn.jsdelivr.net/npm/@xterm/xterm@$XTERM_VER/css/xterm.css"
+curl -fsSL -o "$ASSETS/web/fit.js"    "https://cdn.jsdelivr.net/npm/@xterm/addon-fit@$FIT_VER/lib/addon-fit.js"
+
+echo "[5] index.html + bootstrap.json (sha-inject)"
+cp "$SRC/assets/web/index.html" "$ASSETS/web/index.html"
+cat > "$ASSETS/bootstrap.json" <<EOF
+{
+  "distro": "$DISTRO",
+  "rootfs": { "url": "", "sha256": "$SHA", "sizeBytes": $SIZE },
+  "proot": { "url": "", "sha256": "" }
+}
+EOF
+
+echo "[6] deps"
+curl -fsSL -o "$WORK/libs/commons-compress.jar" "$COMMONS_URL"
+curl -fsSL -o "$WORK/libs/commons-io.jar" "$COMMONS_IO_URL"
+
+echo "[7] javac"
+JAVAS=$(find "$SRC/java" -name '*.java')
+javac --release 11 -cp "$ANDROID_JAR:$WORK/libs/commons-compress.jar" -d "$GEN" $JAVAS
+
+echo "[8] d8"
+jar cf "$WORK/classes.jar" -C "$GEN" .
+d8 --min-api "$DEX_API" --output "$WORK/dex" \
+   "$WORK/classes.jar" "$WORK/libs/commons-compress.jar" "$WORK/libs/commons-io.jar" \
+   --lib "$ANDROID_JAR" 2>/dev/null
+cp "$WORK"/dex/*.dex "$WORK/classes.dex"
+
+echo "[9] aapt2 link (manifest + assets)"
+aapt2 link -o "$WORK/unsigned.apk" \
+  --manifest "$MANIFEST" \
+  -A "$ASSETS" \
+  -I "$AAPT_FRAMEWORK" \
+  --min-sdk-version "$DEX_API" \
+  --target-sdk-version 33 \
+  --version-code 1 --version-name 0.1.0 \
+  --auto-add-overlay --package-id 0x7f --allow-reserved-package-id
+
+echo "[10] inject dex"
+(
+cd "$WORK"
+jar uf unsigned.apk classes.dex
+)
+
+echo "[11] sign"
+KS="${KEYSTORE:-$ROOT/keystore/linuxbox.jks}"
+mkdir -p "$(dirname "$KS")"
+[ -f "$KS" ] || keytool -genkey -v -keystore "$KS" -alias linuxbox -keyalg RSA -keysize 2048 \
+  -validity 10000 -storepass linuxboxpw -keypass linuxboxpw -dname "CN=LinuxBox,OU=App,O=LinuxBox,C=ID" 2>/dev/null
+apksigner sign --ks "$KS" --ks-key-alias linuxbox \
+  --ks-pass pass:linuxboxpw --key-pass pass:linuxboxpw "$WORK/unsigned.apk"
+cp "$WORK/unsigned.apk" "$WORK/linuxbox.apk"
+apksigner verify "$WORK/linuxbox.apk" && echo "VERIFY OK"
+
+echo "APK: $WORK/linuxbox.apk ($(stat -c%s "$WORK/linuxbox.apk") bytes)"
+echo "Install: adb install -r $WORK/linuxbox.apk"

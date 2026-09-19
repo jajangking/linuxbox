@@ -1,0 +1,12 @@
+{
+  "distro": "alpine",
+  "rootfs": {
+    "url": "",
+    "sha256": "",
+    "sizeBytes": 0
+  },
+  "proot": {
+    "url": "",
+    "sha256": ""
+  }
+}
