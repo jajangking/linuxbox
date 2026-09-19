@@ -76,6 +76,19 @@ int main(int argc, char **argv) {
         perror("openpty");
         return 1;
     }
+
+    /* Ukuran PTY bawaan kernel adalah 0x0. Kalau dibiarkan, shell/pager
+       (bash, less, top, ...) mengira terminal lebarnya 0 kolom dan hasilnya
+       berantakan. Tidak ada TIOCSWINSZ dari sisi Java, jadi set fallback 80x24
+       sebelum fork agar anak mewarisi ukuran yang masuk akal. */
+    struct winsize ws;
+    memset(&ws, 0, sizeof(ws));
+    ws.ws_row = 24;
+    ws.ws_col = 80;
+    if (ioctl(master, TIOCSWINSZ, &ws) < 0) {
+        perror("TIOCSWINSZ");
+    }
+
     pid_t pid = fork();
     if (pid < 0) {
         perror("fork");

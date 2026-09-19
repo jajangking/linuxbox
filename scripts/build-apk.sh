@@ -60,6 +60,10 @@ echo "[4] web assets (xterm.js)"
 curl -fsSL -o "$ASSETS/web/xterm.js"  "https://cdn.jsdelivr.net/npm/@xterm/xterm@$XTERM_VER/lib/xterm.js"
 curl -fsSL -o "$ASSETS/web/xterm.css" "https://cdn.jsdelivr.net/npm/@xterm/xterm@$XTERM_VER/css/xterm.css"
 curl -fsSL -o "$ASSETS/web/fit.js"    "https://cdn.jsdelivr.net/npm/@xterm/addon-fit@$FIT_VER/lib/addon-fit.js"
+for f in xterm.js xterm.css fit.js; do
+    [ -s "$ASSETS/web/$f" ] || { echo "GAGAL: aset web $f kosong/tidak terunduh" >&2; exit 1; }
+done
+grep -q "Terminal" "$ASSETS/web/xterm.js" || { echo "GAGAL: xterm.js bukan bundle UMD" >&2; exit 1; }
 
 echo "[5] index.html + bootstrap.json (sha-inject)"
 cp "$SRC/assets/web/index.html" "$ASSETS/web/index.html"

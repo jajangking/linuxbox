@@ -54,12 +54,59 @@ scripts/dev-terminal.sh      # login distro + ttyd :8000
 # buka http://127.0.0.1:8000 di browser
 ```
 
+## Troubleshooting: "command tidak tampil" / layar terminal kosong
+
+Urutan pemeriksaan paling cepat:
+
+```bash
+adb forward tcp:8770 tcp:8770
+curl -s http://127.0.0.1:8770/healthz   # status server + sesi shell
+python3 tools/ws-smoke.py 127.0.0.1 8770  # uji end-to-end (handshake/replay/echo/binary)
+```
+
+`/healthz` mengembalikan misalnya `{"running":true,"port":8770,"sessionAlive":true,
+"clients":1,"shell":"/bin/ash"}`. Kalau `sessionAlive:false`, lihat field
+`lastError`.
+
+Penyebab yang sudah pernah terjadi (dan sudah diperbaiki di kode ini):
+
+1. **Shell di-hardcode ke `/bin/bash`.** Alpine (distro default) tidak punya bash,
+   jadi proot gagal `exec`, sesi mati sebelum browser sempat connect, dan client
+   yang connect belakangan tidak pernah menerima apa pun — terminal bisu total.
+   Sekarang `ProotSession.detectShell()` memilih `/bin/bash` → `/bin/ash` →
+   `/bin/sh` berdasar isi rootfs.
+2. **Tidak ada replay output.** Shell sudah jalan (dan sudah mencetak prompt)
+   0,5 detik sebelum halaman web selesai dimuat; semua byte itu hilang karena
+   tidak ada yang menyimpannya → layar hitam sampai user mengetik sesuatu.
+   Sekarang 256 KB output terakhir disimpan di buffer scrollback dan dikirim
+   ulang ke client saat websocket connect.
+3. **Output PTY dikirim sebagai frame websocket TEXT.** Frame text wajib UTF-8
+   valid; begitu output berisi byte non-UTF-8, atau karakter multibyte yang
+   kepotong di batas `read()` 8192 byte, browser **memutus koneksi**
+   (RFC6455) — output berhenti di tengah jalan. Sekarang semua output PTY
+   dikirim sebagai frame **BINARY** (0x2) dan `index.html` membacanya dengan
+   `Uint8Array`.
+4. **Sesi tidak pernah dimulai ulang.** Sekali shell keluar (ketik `exit`,
+   crash, atau gagal exec), server tetap hidup tapi terminal selamanya bisu.
+   Sekarang ada supervisor: sesi di-restart dengan backoff 1,5s → 15s dan
+   statusnya dikirim ke client.
+5. **Aset `xterm.js` tidak ikut ter-bundle.** `assets/web/` di repo cuma berisi
+   `index.html`; kalau build Gradle dari clone bersih tanpa menjalankan
+   `fetch-assets.sh`, halaman jadi hitam kosong tanpa pesan. Sekarang tugas
+   Gradle `downloadWebAssets` mengunduh `xterm.js/xterm.css/fit.js` otomatis
+   sebelum build, dan kalau gagal build-nya error dengan pesan jelas; sisi
+   klien juga menampilkan pesan error kalau `Terminal` tidak terdefinisi.
+
 ## Status & TODO
 
 - [x] Bootstrap: extract rootfs tar.gz + verify sha256 + copy proot
-- [x] PRoot session builder
+- [x] PRoot session builder (+ deteksi shell: bash/ash/sh)
 - [x] PTY helper (NDK) + relay web terminal
-- [ ] Resize PTY (TIOCSWINSZ) saat window resize — sekarang fix 80x24
+- [x] Relay byte PTY via frame websocket **binary** (aman untuk output non-UTF-8)
+- [x] Replay scrollback ke client yang connect belakangan
+- [x] Supervisor sesi: auto-restart shell + pesan status ke client
+- [x] `/healthz` + `tools/ws-smoke.py` untuk diagnosis
+- [ ] Resize PTY (TIOCSWINSZ) saat window resize — sekarang fallback 80x24
 - [ ] Streaming progress download rootfs tanpa menaruh tar.gz di APK (fallback URL di bootstrap.json)
 - [ ] Backup/export rootfs sekali tap
 - [ ] Multi-distro picker

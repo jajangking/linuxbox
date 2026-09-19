@@ -4,3 +4,11 @@ out/
 .gradle/
 build/
 local.properties
+
+# aset web terminal hasil unduhan (diisi build/fetch-assets.sh)
+android/app/src/main/assets/web/xterm.js
+android/app/src/main/assets/web/xterm.css
+android/app/src/main/assets/web/fit.js
+
+__pycache__/
+*.pyc

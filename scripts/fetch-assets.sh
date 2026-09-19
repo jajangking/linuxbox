@@ -6,8 +6,8 @@ set -euo pipefail
 SDIR="$(cd "$(dirname "$0")" && pwd)"
 ASSETS="$SDIR/../android/app/src/main/assets"
 ROOTFS_DISTRO="${ROOTFS_DISTRO:-alpine}"
-XTERM_VER="${XTERM_VER:-5.3.0}"
-FIT_VER="${FIT_VER:-0.8.0}"
+XTERM_VER="${XTERM_VER:-6.0.0}"
+FIT_VER="${FIT_VER:-0.11.0}"
 
 mkdir -p "$ASSETS/bin" "$ASSETS/web"
 
@@ -35,7 +35,14 @@ echo "  rootfs.tar.gz: $SIZE bytes, sha256=$SHA"
 echo "== 3. web terminal (xterm.js) =="
 curl -fsSL -o "$ASSETS/web/xterm.js"   "https://cdn.jsdelivr.net/npm/@xterm/xterm@$XTERM_VER/lib/xterm.js"
 curl -fsSL -o "$ASSETS/web/xterm.css"  "https://cdn.jsdelivr.net/npm/@xterm/xterm@$XTERM_VER/lib/xterm.css"
-curl -fsSL -o "$ASSETS/web/fit.js"     "https://cdn.jsdelivr.net/npm/@xterm/xterm-addon-fit@$FIT_VER/lib/addon-fit/fit.js"
+# paket scoped @xterm/addon-fit (paket lama @xterm/xterm-addon-fit sudah deprecated)
+curl -fsSL -o "$ASSETS/web/fit.js"     "https://cdn.jsdelivr.net/npm/@xterm/addon-fit@$FIT_VER/lib/addon-fit.js"
+
+# verifikasi: file kosong/berisi halaman error = APK cuma menampilkan layar hitam
+for f in xterm.js xterm.css fit.js; do
+    [ -s "$ASSETS/web/$f" ] || { echo "  GAGAL: $f kosong/tidak terunduh" >&2; exit 1; }
+done
+grep -q "Terminal" "$ASSETS/web/xterm.js" || { echo "  GAGAL: xterm.js bukan bundle UMD" >&2; exit 1; }
 echo "  xterm.js/xterm.css/fit.js ok"
 
 echo "== 4. update bootstrap.json =="

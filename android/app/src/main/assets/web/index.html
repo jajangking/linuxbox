@@ -6,35 +6,129 @@
 <title>LinuxBox</title>
 <link rel="stylesheet" href="xterm.css">
 <style>
-  html, body, #term { height: 100%; margin: 0; background: #0b0e14; }
-  #term { padding: 6px; }
+  html, body { height: 100%; margin: 0; background: #0b0e14; }
+  #wrap { display: flex; flex-direction: column; height: 100%; }
+  #bar {
+    flex: 0 0 auto; font: 12px monospace; color: #8b98ad; background: #0b0e14;
+    padding: 4px 8px; border-bottom: 1px solid #1b2230; display: flex; gap: 10px;
+  }
+  #status.ok { color: #4ec9b0; }
+  #status.bad { color: #f07178; }
+  #term { flex: 1 1 auto; padding: 6px; min-height: 0; }
+  #fatal {
+    display: none; color: #f07178; font: 13px/1.5 monospace;
+    padding: 16px; white-space: pre-wrap;
+  }
 </style>
 </head>
 <body>
-<div id="term"></div>
+<div id="wrap">
+  <div id="bar">
+    <span>LinuxBox</span>
+    <span id="status" class="bad">menyambung...</span>
+  </div>
+  <div id="term"></div>
+  <pre id="fatal"></pre>
+</div>
 <script src="xterm.js"></script>
 <script src="fit.js"></script>
 <script>
-  const term = new Terminal({
+(function () {
+  var fatal = document.getElementById('fatal');
+  var statusEl = document.getElementById('status');
+
+  function die(msg) {
+    // Jangan biarkan layar hitam kosong: aset xterm.js yang hilang (build Gradle
+    // bersih) dulu tidak terlihat sama sekali — sekarang keluar pesannya.
+    fatal.style.display = 'block';
+    fatal.textContent = msg;
+    statusEl.textContent = 'error';
+    statusEl.className = 'bad';
+  }
+
+  if (typeof Terminal === 'undefined') {
+    die('xterm.js tidak termuat.\n\n' +
+        'Asset web (xterm.js, xterm.css, fit.js) belum ada di APK.\n' +
+        'Jalankan:  scripts/fetch-assets.sh   (atau build ulang — tugas Gradle\n' +
+        'downloadWebAssets akan mengunduhnya otomatis), lalu build ulang APK.');
+    return;
+  }
+
+  var term = new Terminal({
     cursorBlink: true,
     fontFamily: 'monospace',
     fontSize: 14,
     theme: { background: '#0b0e14' }
   });
   term.open(document.getElementById('term'));
-  const fit = new FitAddon.FitAddon();
-  term.loadAddon(fit);
-  fit.fit();
 
-  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const ws = new WebSocket(proto + '//' + location.host + '/ws');
+  var fit = null;
+  if (typeof FitAddon !== 'undefined' && FitAddon.FitAddon) {
+    fit = new FitAddon.FitAddon();
+    term.loadAddon(fit);
+  }
+  function doFit() { try { if (fit) fit.fit(); } catch (e) {} }
+  doFit();
+  window.addEventListener('resize', doFit);
 
-  ws.onmessage = (e) => term.write(e.data);
-  ws.onclose = () => term.write('\r\n[web terminal terputus]\r\n');
-  ws.onerror = () => term.write('\r\n[kesalahan web socket]\r\n');
-  term.onData((d) => { if (ws.readyState === WebSocket.OPEN) ws.send(d); });
+  var ws = null;
+  var retries = 0;
+  var closedByServer = false;
 
-  window.addEventListener('resize', () => fit.fit());
+  function setStatus(text, ok) {
+    statusEl.textContent = text;
+    statusEl.className = ok ? 'ok' : 'bad';
+  }
+
+  function connect() {
+    var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    ws = new WebSocket(proto + '//' + location.host + '/ws');
+    // server mengirim frame BINARY (byte PTY mentah, belum tentu UTF-8 valid)
+    ws.binaryType = 'arraybuffer';
+
+    ws.onopen = function () {
+      retries = 0;
+      closedByServer = false;
+      setStatus('terhubung', true);
+      term.focus();
+    };
+
+    ws.onmessage = function (e) {
+      if (typeof e.data === 'string') {
+        term.write(e.data);
+      } else {
+        term.write(new Uint8Array(e.data));
+      }
+    };
+
+    ws.onclose = function () {
+      if (closedByServer) return;
+      setStatus('terputus', false);
+      if (retries >= 10) {
+        term.write('\r\n[web terminal terputus]\r\n');
+        return;
+      }
+      retries++;
+      var wait = Math.min(retries, 5) * 1000;
+      term.write('\r\n[sambungan putus, mencoba lagi ' + (wait / 1000) + 's...]\r\n');
+      setTimeout(function () {
+        // server memutar ulang scrollback setiap connect, jadi bersihkan layar
+        // dulu supaya isi terminal tidak dobel.
+        term.reset();
+        connect();
+      }, wait);
+    };
+
+    ws.onerror = function () { setStatus('kesalahan web socket', false); };
+  }
+
+  term.onData(function (d) {
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(d);
+  });
+
+  document.addEventListener('click', function () { term.focus(); });
+  connect();
+})();
 </script>
 </body>
 </html>
