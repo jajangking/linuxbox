@@ -1,6 +1,4 @@
 out/
-keystore/
-*.jks
 *.apk
 *.idsig
 .gradle/
