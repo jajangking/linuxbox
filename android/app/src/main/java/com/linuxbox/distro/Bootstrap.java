@@ -2,26 +2,25 @@ package com.linuxbox.distro;
 
 import android.content.Context;
 
-import org.apache.commons.compress.archivers.tar.TarArchiveInputStream;
-import org.apache.commons.compress.compressors.gzip.GzipCompressorInputStream;
 import org.json.JSONObject;
 
-import java.io.BufferedReader;
-import java.io.BufferedInputStream;
 import java.io.File;
-import java.io.FileInputStream;
 import java.io.FileOutputStream;
+import java.io.IOException;
 import java.io.InputStream;
-import java.io.InputStreamReader;
-import java.net.HttpURLConnection;
-import java.net.URL;
-import java.security.MessageDigest;
 
-/** Bootstrap sekali jalan: siapkan proot, ptylauncher, dan rootfs distro. */
+/**
+ * Bootstrap: siapkan proot + ptylauncher, lalu pasang rootfs distro.
+ *
+ * Rootfs bisa datang dari dua sumber:
+ *  - `assets/rootfs.tar.gz` (dibuat `scripts/fetch-assets.sh`, dipakai kalau
+ *    entri katalog tidak punya URL), atau
+ *  - unduhan langsung (streaming) dari `url` di `distros.json` — tidak perlu
+ *    menaruh arsip besar di APK.
+ */
 public class Bootstrap {
 
-    public interface Log {
-        void log(String line);
+    public interface Log extends TaskLog {
     }
 
     private final Context ctx;
@@ -32,9 +31,59 @@ public class Bootstrap {
         this.log = log;
     }
 
+    /** Siapkan binary + pastikan distro aktif terpasang. */
     public void install() throws Exception {
+        bootstrapBinaries();
+        DistroCatalog.Distro d = DistroCatalog.current(ctx);
+        if (DistroCatalog.isInstalled(ctx, d.id)) {
+            log.log("Distro " + d.id + " sudah terpasang.");
+        } else {
+            install(d);
+        }
+        log.log("Selesai. Distro siap.");
+    }
+
+    /** Pasang (atau ganti) distro tertentu. */
+    public void install(DistroCatalog.Distro d) throws Exception {
+        if (d == null) throw new IOException("distro tidak dipilih");
+        bootstrapBinaries();
+        File filesDir = ctx.getFilesDir();
+        File rootfs = ProotSession.rootfsDir(filesDir, d.id);
+        File tmp = new File(filesDir, "rootfs-tmp-" + System.currentTimeMillis());
+        boolean done = false;
+        try {
+            File archive = obtainArchive(d);
+            try {
+                log.log("Mengekstrak ke " + rootfs.getName() + "...");
+                TarUtil.deleteRecursively(tmp);
+                int entries = TarUtil.extract(archive, tmp, log);
+                if (entries == 0) {
+                    throw new IOException("arsip rootfs kosong atau tidak dikenal");
+                }
+            } finally {
+                if (d.url != null && !d.url.isEmpty()) archive.delete();
+            }
+
+            File old = new File(filesDir, rootfs.getName() + ".old-" + System.currentTimeMillis());
+            boolean hadOld = rootfs.exists() && rootfs.renameTo(old);
+            if (rootfs.exists()) {
+                throw new IOException("masih ada rootfs lama di " + rootfs.getAbsolutePath());
+            }
+            if (!tmp.renameTo(rootfs)) {
+                if (hadOld) old.renameTo(rootfs);
+                throw new IOException("gagal menempatkan rootfs baru");
+            }
+            if (hadOld) TarUtil.deleteRecursively(old);
+            DistroCatalog.setActiveId(ctx, d.id);
+            done = true;
+        } finally {
+            if (!done) TarUtil.deleteRecursively(tmp);
+        }
+        log.log("Distro " + d.id + " siap (" + ProotSession.detectShell(rootfs) + ").");
+    }
+
+    private void bootstrapBinaries() throws Exception {
         File dir = ctx.getFilesDir();
-        JSONObject json = new JSONObject(readAsset("bootstrap.json"));
 
         File proot = ProotSession.prootBin(dir);
         File libTalloc = new File(dir, "bin/libtalloc.so.2");
@@ -55,47 +104,50 @@ public class Bootstrap {
             copyAsset("bin/ptylauncher", pty);
             pty.setExecutable(true, false);
         }
+    }
 
-        File rootfsDir = ProotSession.rootfsDir(dir);
-        File bash = new File(rootfsDir, "bin/bash");
-        File sh = new File(rootfsDir, "bin/sh");
-        if (!bash.exists() && !sh.exists()) {
-            File tarGz = new File(dir, "rootfs.tar.gz");
-            if (!tarGz.exists()) {
-                String url = json.getJSONObject("rootfs").optString("url");
-                if (!url.isEmpty()) {
-                    log.log("Mendownload rootfs...");
-                    download(url, tarGz, json.getJSONObject("rootfs").optLong("sizeBytes"));
-                } else {
-                    log.log("Menyalin rootfs.tar.gz dari assets...");
-                    copyAsset("rootfs.tar.gz", tarGz);
-                }
-            }
-            String sha = sha256(tarGz);
-            String expect = json.getJSONObject("rootfs").optString("sha256");
-            if (!expect.isEmpty() && !expect.equals(sha)) {
-                throw new java.io.IOException("sha256 mismatch\n  dapat  : " + sha + "\n  diharap: " + expect);
-            }
-            log.log("sha256 ok. Mengekstrak rootfs...");
-            extract(tarGz, rootfsDir);
-            tarGz.delete();
+    private File obtainArchive(DistroCatalog.Distro d) throws Exception {
+        File filesDir = ctx.getFilesDir();
+        if (d.url != null && !d.url.isEmpty()) {
+            File out = new File(filesDir, "rootfs-" + d.id + ".tar.gz");
+            Downloader.download(d.url, out, d.sizeBytes, d.sha256, log);
+            return out;
         }
-        log.log("Selesai. Distro siap.");
+        // fallback: arsip yang dibundel di assets
+        File tarGz = new File(filesDir, "rootfs.tar.gz");
+        if (!tarGz.isFile()) {
+            log.log("Menyalin rootfs.tar.gz dari assets...");
+            copyAsset("rootfs.tar.gz", tarGz);
+        }
+        String expect = "";
+        try {
+            JSONObject json = new JSONObject(readAsset("bootstrap.json"));
+            expect = json.getJSONObject("rootfs").optString("sha256", "");
+        } catch (Exception ignored) {
+        }
+        if (!expect.isEmpty()) {
+            String got = Downloader.sha256(tarGz);
+            if (!expect.equalsIgnoreCase(got)) {
+                throw new IOException("sha256 mismatch\n  dapat   : " + got + "\n  diharap : " + expect);
+            }
+            log.log("  sha256 ok");
+        }
+        return tarGz;
     }
 
     private String readAsset(String name) throws Exception {
         InputStream is = ctx.getAssets().open(name);
-        BufferedReader r = new BufferedReader(new InputStreamReader(is));
-        StringBuilder sb = new StringBuilder();
-        String l;
-        while ((l = r.readLine()) != null) sb.append(l).append('\n');
-        r.close();
-        return sb.toString();
+        java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+        byte[] buf = new byte[1 << 16];
+        int n;
+        while ((n = is.read(buf)) > 0) bos.write(buf, 0, n);
+        is.close();
+        return new String(bos.toByteArray(), java.nio.charset.StandardCharsets.UTF_8);
     }
 
     private void copyAsset(String name, File dest) throws Exception {
         File p = dest.getParentFile();
-        if (p != null) p.mkdirs();
+        if (p != null && !p.isDirectory()) p.mkdirs();
         InputStream in = ctx.getAssets().open(name);
         FileOutputStream out = new FileOutputStream(dest);
         byte[] buf = new byte[1 << 16];
@@ -103,77 +155,5 @@ public class Bootstrap {
         while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
         out.close();
         in.close();
-    }
-
-    private String sha256(File f) throws Exception {
-        MessageDigest md = MessageDigest.getInstance("SHA-256");
-        FileInputStream in = new FileInputStream(f);
-        byte[] buf = new byte[1 << 16];
-        int n;
-        while ((n = in.read(buf)) > 0) md.update(buf, 0, n);
-        in.close();
-        StringBuilder sb = new StringBuilder();
-        for (byte b : md.digest()) sb.append(String.format("%02x", b));
-        return sb.toString();
-    }
-
-    private void download(String url, File dest, long sizeBytes) throws Exception {
-        HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
-        conn.setInstanceFollowRedirects(true);
-        conn.connect();
-        long total = sizeBytes > 0 ? sizeBytes : Math.max(conn.getContentLengthLong(), 0);
-        InputStream in = conn.getInputStream();
-        FileOutputStream out = new FileOutputStream(dest);
-        byte[] buf = new byte[1 << 16];
-        long done = 0;
-        int n;
-        long pct = -1;
-        while ((n = in.read(buf)) > 0) {
-            out.write(buf, 0, n);
-            done += n;
-            if (total > 0 && done * 100 / total != pct) {
-                pct = done * 100 / total;
-                log.log("  " + pct + "%");
-            }
-        }
-        out.close();
-        in.close();
-        conn.disconnect();
-    }
-
-    private void extract(File tarGz, File dest) throws Exception {
-        dest.mkdirs();
-        TarArchiveInputStream tin =
-                new TarArchiveInputStream(new GzipCompressorInputStream(
-                        new BufferedInputStream(new FileInputStream(tarGz))));
-        try {
-            org.apache.commons.compress.archivers.tar.TarArchiveEntry e = tin.getNextTarEntry();
-            while (e != null) {
-                File f = new File(dest, e.getName());
-                if (e.isDirectory()) {
-                    f.mkdirs();
-                } else if (e.isSymbolicLink()) {
-                    File p = f.getParentFile();
-                    if (p != null) p.mkdirs();
-                    try {
-                        java.nio.file.Files.createSymbolicLink(
-                                f.toPath(), java.nio.file.Paths.get(e.getLinkName()));
-                    } catch (Exception ignored) {
-                    }
-                } else {
-                    File p = f.getParentFile();
-                    if (p != null) p.mkdirs();
-                    FileOutputStream out = new FileOutputStream(f);
-                    byte[] buf = new byte[1 << 16];
-                    int n;
-                    while ((n = tin.read(buf)) > 0) out.write(buf, 0, n);
-                    out.close();
-                    if ((e.getMode() & 0x100) != 0) f.setExecutable(true);
-                }
-                e = tin.getNextTarEntry();
-            }
-        } finally {
-            tin.close();
-        }
     }
 }

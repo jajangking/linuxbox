@@ -2,6 +2,7 @@ package com.linuxbox.web;
 
 import android.content.Context;
 
+import com.linuxbox.distro.DistroCatalog;
 import com.linuxbox.distro.ProotSession;
 import com.linuxbox.distro.PtyHelper;
 
@@ -66,8 +67,15 @@ public class WebTerminalServer {
     private volatile PtyHelper pty;
     private volatile String lastError;
     private final ServerSocket server;
+    /** null/kosong = tanpa autentikasi (mode localhost). */
+    private final String token;
 
     public WebTerminalServer(Context ctx, int port, boolean lan) throws IOException {
+        this(ctx, port, lan, null);
+    }
+
+    public WebTerminalServer(Context ctx, int port, boolean lan, String token) throws IOException {
+        this.token = token;
         this.ctx = ctx;
         this.server = new ServerSocket();
         server.setReuseAddress(true);
@@ -116,7 +124,9 @@ public class WebTerminalServer {
                 .append(",\"sessionAlive\":").append(p != null && p.isAlive())
                 .append(",\"clients\":").append(clients.size())
                 .append(",\"resize\":").append(p != null && p.hasControl())
-                .append(",\"shell\":\"").append(ProotSession.detectShell(ctx.getFilesDir())).append('"');
+                .append(",\"auth\":").append(token != null && !token.isEmpty())
+                .append(",\"distro\":\"").append(DistroCatalog.activeId(ctx)).append('"')
+                .append(",\"shell\":\"").append(ProotSession.detectShell(ProotSession.activeRootfsDir(ctx))).append('"');
         String err = lastError;
         if (err != null) {
             sb.append(",\"lastError\":\"").append(err.replace("\"", "'").replace("\n", " ")).append('"');
@@ -129,7 +139,9 @@ public class WebTerminalServer {
 
     private PtyHelper openSession() throws Exception {
         File dir = ctx.getFilesDir();
-        PtyHelper p = PtyHelper.start(dir, ProotSession.buildCommand(dir), ProotSession.environment(dir));
+        File rootfs = ProotSession.activeRootfsDir(ctx);
+        PtyHelper p = PtyHelper.start(dir, rootfs, ProotSession.buildCommand(dir, rootfs),
+                ProotSession.environment(dir, rootfs));
         lastError = null;
         return p;
     }
@@ -149,7 +161,7 @@ public class WebTerminalServer {
                     }
                     delay = RESTART_MIN_DELAY_MS;
                     broadcast(bytes("\r\n[sesi shell baru dimulai: "
-                            + ProotSession.detectShell(ctx.getFilesDir()) + "]\r\n"));
+                            + ProotSession.detectShell(ProotSession.activeRootfsDir(ctx)) + "]\r\n"));
                     broadcastControl(CONTROL_NEED_SIZE);
                 } catch (Exception e) {
                     lastError = String.valueOf(e.getMessage());
@@ -250,7 +262,9 @@ public class WebTerminalServer {
             if (requestLine == null) return;
             String[] parts = requestLine.split(" ");
             String method = parts.length > 0 ? parts[0] : "";
-            String path = parts.length > 1 ? parts[1] : "/";
+            String target = parts.length > 1 ? parts[1] : "/";
+            int qm = target.indexOf('?');
+            String path = qm >= 0 ? target.substring(0, qm) : target;
 
             Map<String, String> headers = new ConcurrentHashMap<>();
             String line;
@@ -258,6 +272,11 @@ public class WebTerminalServer {
                 int idx = line.indexOf(':');
                 if (idx > 0) headers.put(line.substring(0, idx).trim().toLowerCase(),
                         line.substring(idx + 1).trim());
+            }
+
+            if (!authorized(target, headers)) {
+                serveUnauthorized(output);
+                return;
             }
 
             if ("/healthz".equals(path)) {
@@ -278,6 +297,26 @@ public class WebTerminalServer {
             if (client != null) clients.remove(client.socket);
             try { sock.close(); } catch (IOException ignored) {}
         }
+    }
+
+    /** Halaman 401 yang menjelaskan apa yang harus dilakukan (bukan layar kosong). */
+    private void serveUnauthorized(OutputStream output) throws IOException {
+        byte[] body = bytes("<html lang=\"id\"><head><meta charset=\"utf-8\">"
+                + "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+                + "<title>401 - butuh token</title></head>"
+                + "<body style=\"font-family:monospace;background:#0b0e14;color:#c8c8c8;padding:24px\">"
+                + "<h2 style=\"color:#f07178\">401 - butuh token</h2>"
+                + "<p>Terminal ini dilindungi token.</p>"
+                + "<p>Buka URL <b>lengkap</b> yang ada di notifikasi atau log LinuxBox "
+                + "(ada <code>?token=...</code>-nya), atau matikan opsi <b>Token</b> "
+                + "di aplikasi lalu start ulang server.</p></body></html>");
+        output.write(("HTTP/1.1 401 Unauthorized\r\n" +
+                "Content-Type: text/html; charset=utf-8\r\n" +
+                "Content-Length: " + body.length + "\r\n" +
+                "Cache-Control: no-store\r\n" +
+                "Connection: close\r\n\r\n").getBytes(StandardCharsets.UTF_8));
+        output.write(body);
+        output.flush();
     }
 
     private void serveHealth(OutputStream output) throws IOException {
@@ -562,11 +601,18 @@ public class WebTerminalServer {
                 : name.endsWith(".js") ? "application/javascript"
                 : name.endsWith(".json") ? "application/json"
                 : "text/html";
-        output.write(("HTTP/1.1 200 OK\r\n" +
-                "Content-Type: " + mime + "; charset=utf-8\r\n" +
-                "Content-Length: " + bytes.length + "\r\n" +
-                "Cache-Control: no-cache\r\n" +
-                "Connection: close\r\n\r\n").getBytes(StandardCharsets.UTF_8));
+        StringBuilder head = new StringBuilder();
+        head.append("HTTP/1.1 200 OK\r\n")
+                .append("Content-Type: ").append(mime).append("; charset=utf-8\r\n")
+                .append("Content-Length: ").append(bytes.length).append("\r\n")
+                .append("Cache-Control: no-cache\r\n");
+        if (token != null && !token.isEmpty() && "text/html".equals(mime)) {
+            // supaya navigasi berikutnya tidak perlu menyalin ?token= di URL
+            head.append("Set-Cookie: linuxbox_token=").append(token)
+                    .append("; Path=/; HttpOnly; SameSite=Lax\r\n");
+        }
+        head.append("Connection: close\r\n\r\n");
+        output.write(head.toString().getBytes(StandardCharsets.UTF_8));
         output.write(bytes);
         output.flush();
     }
@@ -579,6 +625,48 @@ public class WebTerminalServer {
         while ((n = is.read(buf)) > 0) out.write(buf, 0, n);
         is.close();
         return out.toByteArray();
+    }
+
+    // ---------- autentikasi ----------
+
+    /** Token boleh di query string (?token=...) atau cookie linuxbox_token. */
+    private boolean authorized(String target, Map<String, String> headers) {
+        if (token == null || token.isEmpty()) return true;
+        String fromQuery = queryParam(target, "token");
+        if (fromQuery != null && tokenMatches(fromQuery)) return true;
+        String cookie = headers.get("cookie");
+        if (cookie != null) {
+            for (String part : cookie.split(";")) {
+                int eq = part.indexOf('=');
+                if (eq < 0) continue;
+                if (part.substring(0, eq).trim().equals("linuxbox_token")
+                        && tokenMatches(part.substring(eq + 1).trim())) return true;
+            }
+        }
+        return false;
+    }
+
+    /** Bandingkan dengan waktu konstan (menghindari timing attack sederhana). */
+    private boolean tokenMatches(String candidate) {
+        return MessageDigest.isEqual(token.getBytes(StandardCharsets.UTF_8),
+                candidate.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static String queryParam(String target, String key) {
+        int q = target.indexOf('?');
+        if (q < 0) return null;
+        for (String part : target.substring(q + 1).split("&")) {
+            int eq = part.indexOf('=');
+            if (eq < 0) continue;
+            if (!part.substring(0, eq).equals(key)) continue;
+            String v = part.substring(eq + 1);
+            try {
+                return java.net.URLDecoder.decode(v, "UTF-8");
+            } catch (Exception e) {
+                return v;
+            }
+        }
+        return null;
     }
 
     // ---------- util ----------

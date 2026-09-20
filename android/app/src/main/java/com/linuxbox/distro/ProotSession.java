@@ -1,6 +1,10 @@
 package com.linuxbox.distro;
 
+import android.content.Context;
+
 import java.io.File;
+import java.util.ArrayList;
+import java.util.List;
 
 /** Lokasi & assembly command untuk PRoot session. */
 public final class ProotSession {
@@ -21,10 +25,6 @@ public final class ProotSession {
             "/bin/zsh",
     };
 
-    public static File rootfsDir(File dir) {
-        return new File(dir, "rootfs");
-    }
-
     public static File prootBin(File dir) {
         return new File(dir, "bin/proot");
     }
@@ -34,45 +34,59 @@ public final class ProotSession {
         return new File(dir, "bin/ptylauncher");
     }
 
+    /** Setiap distro punya direktori sendiri: files/rootfs-<id>. */
+    public static File rootfsDir(File filesDir, String distroId) {
+        return new File(filesDir, "rootfs-" + distroId);
+    }
+
+    /** @deprecated pakai {@link #rootfsDir(File, String)} — multi-distro. */
+    public static File rootfsDir(File filesDir) {
+        return rootfsDir(filesDir, "alpine");
+    }
+
+    /** Direktori rootfs distro yang sedang aktif. */
+    public static File activeRootfsDir(Context ctx) {
+        return rootfsDir(ctx.getFilesDir(), DistroCatalog.activeId(ctx));
+    }
+
     /**
      * Pilih shell yang benar-benar ada di rootfs. Fallback terakhir /bin/sh:
      * kalau tidak ada sama sekali, pesan error proot yang tampil di terminal
      * jauh lebih berguna daripada layar hitam kosong.
      */
-    public static String detectShell(File dir) {
-        File root = rootfsDir(dir);
+    public static String detectShell(File rootfs) {
         for (String candidate : SHELL_CANDIDATES) {
-            if (new File(root, candidate).isFile()) return candidate;
+            if (new File(rootfs, candidate).isFile()) return candidate;
         }
         return "/bin/sh";
     }
 
-    public static java.util.List<String> buildCommand(File dir) {
-        return buildCommand(dir, new java.util.ArrayList<String>());
+    public static List<String> buildCommand(File filesDir, File rootfs) {
+        return buildCommand(filesDir, rootfs, new ArrayList<String>());
     }
 
-    public static java.util.List<String> buildCommand(File dir, java.util.List<String> extraBind) {
-        File root = rootfsDir(dir);
-        java.util.List<String> cmd = new java.util.ArrayList<>();
-        cmd.add(prootBin(dir).getAbsolutePath());
-        cmd.add("--rootfs=" + root.getAbsolutePath());
+    public static List<String> buildCommand(File filesDir, File rootfs, List<String> extraBind) {
+        List<String> cmd = new ArrayList<>();
+        cmd.add(prootBin(filesDir).getAbsolutePath());
+        cmd.add("--rootfs=" + rootfs.getAbsolutePath());
         cmd.add("--link2symlink");
         cmd.add("-b"); cmd.add("/proc");
         cmd.add("-b"); cmd.add("/sys");
         cmd.add("-b"); cmd.add("/dev");
-        for (String b : extraBind) {
-            cmd.add("-b"); cmd.add(b);
+        if (extraBind != null) {
+            for (String b : extraBind) {
+                cmd.add("-b"); cmd.add(b);
+            }
         }
         cmd.add("--kill-on-exit");
-        String shell = detectShell(dir);
-        cmd.add(shell);
+        cmd.add(detectShell(rootfs));
         cmd.add("-l");
         return cmd;
     }
 
-    public static java.util.Map<String, String> environment(File dir) {
+    public static java.util.Map<String, String> environment(File filesDir, File rootfs) {
         java.util.Map<String, String> env = new java.util.HashMap<>();
-        String shell = detectShell(dir);
+        String shell = detectShell(rootfs);
         env.put("HOME", "/root");
         env.put("SHELL", shell);
         env.put("TERM", "xterm-256color");
@@ -80,7 +94,7 @@ public final class ProotSession {
         env.put("LANG", "C.UTF-8");
         env.put("TMPDIR", "/tmp");
         env.put("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
-        env.put("LD_LIBRARY_PATH", new File(dir, "bin").getAbsolutePath());
+        env.put("LD_LIBRARY_PATH", new File(filesDir, "bin").getAbsolutePath());
         return env;
     }
 }

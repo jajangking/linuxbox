@@ -11,8 +11,9 @@ dari laptop di jaringan yang sama — "desktop Linux di pocket, diakses dari bro
 MainActivity ──install──> Bootstrap (unduh/extract rootfs + proot)
       │
       └──start──> TermServerService ──> WebTerminalServer (ServerSocket 127.0.0.1/<lan>)
-                                            │  http://<ip>:PORT/  (xterm.js UI)
-                                            │  ws://<ip>:PORT/ws (byte relay)
+                                            │  http://<ip>:PORT/  (xterm.js UI, ?token=...)
+                                            │  ws://<ip>:PORT/ws  (relay byte, frame binary)
+                                            │  ws://<ip>:PORT/ctl (kontrol JSON: resize)
                                             ▼
                                     PtyHelper ──ptylauncher (NDK)──> exec PRoot
                                             │
@@ -20,6 +21,17 @@ MainActivity ──install──> Bootstrap (unduh/extract rootfs + proot)
                                       distro rootfs (proot --rootfs=...)
 ```
 
+- **Multi-distro**: setiap distro punya direktori sendiri (`files/rootfs-<id>`) dan
+  daftarnya ada di `assets/distros.json` (bisa diedit tanpa ubah kode). Distro
+  aktif tersimpan di SharedPreferences.
+- **Unduhan streaming**: rootfs diunduh langsung dari `url` di katalog (progress,
+  SHA-256 sekali jalan, berkas `.part` dulu) — tidak perlu menaruh tar.gz besar
+  di APK. `assets/rootfs.tar.gz` tetap didukung sebagai fallback.
+- **Backup/restore**: rootfs aktif dikemas jadi tar.gz (+`.sha256`), disalin ke
+  folder Download, dan bisa dipulihkan dari berkas pilihan (SAF).
+- **Autentikasi**: saat server dibuka ke LAN, akses web terminal wajib token
+  (`?token=...` atau cookie `linuxbox_token`); tanpa token -> halaman 401 yang
+  menjelaskan apa yang harus dilakukan.
 - **PRoot**: emulasi root/no-root. Binary di-bundle dari Termux build machine.
 - **ptylauncher.c**: helper NDK kecil — `openpty()+fork()`, pasang slave ke stdio
   guest, lalu relay `master <-> stdin/stdout` proses. Alasan: Java/Android tidak punya
@@ -65,13 +77,15 @@ Urutan pemeriksaan paling cepat:
 
 ```bash
 adb forward tcp:8770 tcp:8770
-curl -s http://127.0.0.1:8770/healthz   # status server + sesi shell
-python3 tools/ws-smoke.py 127.0.0.1 8770  # uji end-to-end (handshake/replay/echo/binary)
+curl -s "http://127.0.0.1:8770/healthz?token=TOKEN"   # status server + sesi shell
+python3 tools/ws-smoke.py 127.0.0.1 8770 [token]      # uji end-to-end
 ```
 
 `/healthz` mengembalikan misalnya `{"running":true,"port":8770,"sessionAlive":true,
-"clients":1,"shell":"/bin/ash"}`. Kalau `sessionAlive:false`, lihat field
-`lastError`.
+"clients":1,"resize":true,"auth":true,"distro":"alpine","shell":"/bin/ash"}`.
+Kalau `sessionAlive:false`, lihat field `lastError`. Token (kalau aktif) ada di
+log aplikasi / URL yang disiarkan; tanpa token, request apa pun mendapat
+halaman 401.
 
 Penyebab yang sudah pernah terjadi (dan sudah diperbaiki di kode ini):
 
@@ -110,6 +124,13 @@ Penyebab yang sudah pernah terjadi (dan sudah diperbaiki di kode ini):
    sebelum build, dan kalau gagal build-nya error dengan pesan jelas; sisi
    klien juga menampilkan pesan error kalau `Terminal` tidak terdefinisi.
 
+## Catatan upgrade
+
+Sejak dukungan multi-distro, rootfs tidak lagi di `files/rootfs` melainkan
+`files/rootfs-<id>` (mis. `files/rootfs-alpine`). Kalau kamu sudah pernah
+memasang distro dengan versi sebelumnya, jalankan **'Pasang distro'** sekali lagi
+(setelah itu terminal akan memakai direktori baru).
+
 ## Status & TODO
 
 - [x] Bootstrap: extract rootfs tar.gz + verify sha256 + copy proot
@@ -120,7 +141,10 @@ Penyebab yang sudah pernah terjadi (dan sudah diperbaiki di kode ini):
 - [x] Supervisor sesi: auto-restart shell + pesan status ke client
 - [x] `/healthz` + `tools/ws-smoke.py` untuk diagnosis
 - [x] Resize PTY (TIOCSWINSZ) mengikuti ukuran window browser (kanal `/ctl`)
-- [ ] Streaming progress download rootfs tanpa menaruh tar.gz di APK (fallback URL di bootstrap.json)
-- [ ] Backup/export rootfs sekali tap
-- [ ] Multi-distro picker
-- [ ] Hardening: validasi path entry tar (Zip-slip), autentikasi web terminal opsional
+- [x] Unduhan streaming rootfs dari URL katalog (progress + sha256 + `.part`)
+- [x] Backup/restore rootfs satu tap (tar.gz + `.sha256`, ekspor ke Download)
+- [x] Multi-distro picker (`assets/distros.json`, rootfs per-`<id>`)
+- [x] Hardening: validasi path entry tar (Zip-slip) + symlink escape, autentikasi token
+- [ ] Verifikasi tanda tangan (GPG/SHA256SUMS) saat mengunduh distro
+- [ ] Lanjutkan unduhan yang terputus (HTTP Range)
+- [ ] Enkripsi backup rootfs

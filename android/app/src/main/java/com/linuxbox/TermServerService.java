@@ -10,6 +10,7 @@ import android.os.IBinder;
 import android.util.Log;
 import android.widget.Toast;
 
+import com.linuxbox.web.TokenStore;
 import com.linuxbox.web.WebTerminalServer;
 
 import java.util.concurrent.atomic.AtomicReference;
@@ -38,6 +39,10 @@ public class TermServerService extends Service {
         if (serverRef.get() == null && starting.compareAndSet(false, true)) {
             int port = intent != null ? intent.getIntExtra("port", 8770) : 8770;
             boolean lan = intent != null && intent.getBooleanExtra("lan", false);
+            boolean wantAuth = intent != null && intent.getBooleanExtra("auth", false);
+            // Terminal yang terbuka ke LAN wajib ber-token; mode localhost
+            // juga bisa dipaksa ber-token lewat opsi "auth".
+            final String token = (lan || wantAuth) ? TokenStore.getOrCreate(this) : null;
             int finalPort = port;
 
             // panggil startForeground SEGERA (wajib <5s), perbarui setelah server jalan
@@ -45,10 +50,12 @@ public class TermServerService extends Service {
                     "LinuxBox memulai terminal..."));
             new Thread(() -> {
                 try {
-                    WebTerminalServer server = new WebTerminalServer(this, finalPort, lan);
+                    WebTerminalServer server = new WebTerminalServer(this, finalPort, lan, token);
                     server.start();
                     serverRef.set(server);
-                    String url = "http://127.0.0.1:" + server.getBoundPort() + "/";
+                    String host = lan ? lanHost() : "127.0.0.1";
+                    String query = token != null ? "?token=" + token : "";
+                    String url = "http://" + host + ":" + server.getBoundPort() + "/" + query;
                     NotificationManager nm = getSystemService(NotificationManager.class);
                     nm.notify(NOTIF_ID, buildNotification(url, "Terminal: " + url));
                     sendBroadcast(new Intent("com.linuxbox.URL").putExtra("url", url));
@@ -71,6 +78,28 @@ public class TermServerService extends Service {
             }, "tty-start").start();
         }
         return START_NOT_STICKY;
+    }
+
+    /** Alamat IP Wi-Fi/LAN (tanpa permission): dipakai untuk URL saat mode LAN. */
+    private String lanHost() {
+        try {
+            java.util.Enumeration<java.net.NetworkInterface> en =
+                    java.net.NetworkInterface.getNetworkInterfaces();
+            while (en.hasMoreElements()) {
+                java.net.NetworkInterface ni = en.nextElement();
+                if (!ni.isUp() || ni.isLoopback()) continue;
+                java.util.Enumeration<java.net.InetAddress> addrs = ni.getInetAddresses();
+                while (addrs.hasMoreElements()) {
+                    java.net.InetAddress a = addrs.nextElement();
+                    if (a instanceof java.net.Inet4Address && !a.isLoopbackAddress()
+                            && a.isSiteLocalAddress()) {
+                        return a.getHostAddress();
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return "127.0.0.1";
     }
 
     private Notification buildNotification(String url, String content) {

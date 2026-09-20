@@ -41,11 +41,10 @@ public class PtyHelper {
         this.ctrlSock = ctrlSock;
     }
 
-    public static PtyHelper start(File dir, java.util.List<String> command,
+    public static PtyHelper start(File filesDir, File rootfs, java.util.List<String> command,
                                   java.util.Map<String, String> env) throws Exception {
-        File helper = ProotSession.ptyBin(dir);
-        File proot = ProotSession.prootBin(dir);
-        File rootfs = ProotSession.rootfsDir(dir);
+        File helper = ProotSession.ptyBin(filesDir);
+        File proot = ProotSession.prootBin(filesDir);
 
         requireExecutable(helper, "ptylauncher");
         requireExecutable(proot, "proot");
@@ -54,7 +53,7 @@ public class PtyHelper {
                     + " — jalankan 'Install distro' dulu");
         }
 
-        File ctrl = new File(dir, "ctrl.sock");
+        File ctrl = new File(filesDir, "ctrl.sock");
         java.util.Map<String, String> e = new java.util.HashMap<>(env);
         e.put(CTRL_ENV, ctrl.getAbsolutePath());
 
@@ -62,7 +61,7 @@ public class PtyHelper {
         argv.add(helper.getAbsolutePath());
         argv.addAll(command);
         ProcessBuilder pb = new ProcessBuilder(argv);
-        pb.directory(rootfs.exists() ? rootfs : dir);
+        pb.directory(rootfs.exists() ? rootfs : filesDir);
         pb.environment().clear();
         pb.environment().putAll(e);
 

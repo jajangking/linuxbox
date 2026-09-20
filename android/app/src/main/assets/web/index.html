@@ -72,6 +72,12 @@
   window.addEventListener('resize', doFit);
   term.onResize(function () { sendSize(); });
 
+  // token (?token=...) diteruskan ke /ws dan /ctl kalau server memakai auth
+  function tokenQuery() {
+    var m = /[?&]token=([^&]*)/.exec(location.search || '');
+    return m ? '?token=' + encodeURIComponent(decodeURIComponent(m[1])) : '';
+  }
+
   var ws = null;
   var ctl = null;
   var retries = 0;
@@ -85,7 +91,7 @@
 
   function connectCtl() {
     var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    ctl = new WebSocket(proto + '//' + location.host + '/ctl');
+    ctl = new WebSocket(proto + '//' + location.host + '/ctl' + tokenQuery());
     ctl.onopen = function () { sendSize(); };
     ctl.onmessage = function (e) {
       // server minta ukuran ulang (mis. setelah sesi shell di-restart)
@@ -102,7 +108,7 @@
 
   function connect() {
     var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    ws = new WebSocket(proto + '//' + location.host + '/ws');
+    ws = new WebSocket(proto + '//' + location.host + '/ws' + tokenQuery());
     // server mengirim frame BINARY (byte PTY mentah, belum tentu UTF-8 valid)
     ws.binaryType = 'arraybuffer';
 

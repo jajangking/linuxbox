@@ -6,6 +6,7 @@ layar hitam kosong. Bisa diarahkan ke HP (adb forward) atau ke server lokal.
 
     adb forward tcp:8770 tcp:8770
     python3 tools/ws-smoke.py 127.0.0.1 8770
+    python3 tools/ws-smoke.py 127.0.0.1 8770 <token>   # kalau auth aktif
 
 Yang dicek:
   1. HTTP  /          -> index.html tersedia (aset web ikut ter-bundling)
@@ -124,28 +125,36 @@ class Ws:
 def main():
     host = sys.argv[1] if len(sys.argv) > 1 else "127.0.0.1"
     port = int(sys.argv[2]) if len(sys.argv) > 2 else 8770
+    token = sys.argv[3] if len(sys.argv) > 3 else ""
+    query = ("?token=" + token) if token else ""
     fails = []
 
     def check(name, ok, detail=""):
         print("  [%s] %s%s" % ("OK " if ok else "GAGAL", name, (" — " + detail) if detail else ""))
         if not ok:
             fails.append(name)
+        return ok
 
     print("LinuxBox smoke test -> %s:%d" % (host, port))
 
-    code, body = http_get(host, port, "/")
+    code, body = http_get(host, port, "/" + query)
     check("GET / (index.html)", code == "200" and b"xterm" in body, "HTTP " + code)
 
-    code, body = http_get(host, port, "/healthz")
+    code, body = http_get(host, port, "/healthz" + query)
     health = body.decode("utf-8", "replace").strip()
-    check("GET /healthz", code == "200", health[:160])
-    if '"sessionAlive":false' in health.replace(" ", ""):
-        check("sesi shell hidup", False, "sessionAlive=false — shell tidak jalan, cek lastError")
-    elif health:
-        check("sesi shell hidup", '"sessionAlive":true' in health.replace(" ", ""))
+    check("GET /healthz", code == "200" and health.startswith("{"), health[:160])
+    if health.startswith("{"):
+        # JSON status hanya ada kalau kita lolos autentikasi
+        if '"sessionAlive":false' in health.replace(" ", ""):
+            check("sesi shell hidup", False, "sessionAlive=false — shell tidak jalan, cek lastError")
+        else:
+            check("sesi shell hidup", '"sessionAlive":true' in health.replace(" ", ""), health[:160])
 
-    ws = Ws(host, port)
-    check("handshake websocket", "101" in ws.status, ws.status)
+    ws = Ws(host, port, "/ws" + query)
+    if not check("handshake websocket", "101" in ws.status, ws.status):
+        print()
+        print("HASIL: server menolak websocket — cek token (?token=...) atau server belum jalan.")
+        return 1
 
     frames, alive = ws.frames(2.0)
     replay = sum(len(p) for _, p in frames)
@@ -171,10 +180,15 @@ def main():
           "koneksi tetap hidup" if alive else "KONEKSI DIPUTUS (frame text?)")
 
     # kanal kontrol /ctl: ukuran PTY mengikuti window
-    ctl = Ws(host, port, path="/ctl")
+    ctl = Ws(host, port, path="/ctl" + query)
     first = b"".join(p for _, p in ctl.frames(2.0)[0]).decode("utf-8", "replace")
-    check("handshake /ctl + pesan need-size", "101" in ctl.status and "need-size" in first,
-          ctl.status + " " + first[:60])
+    if not check("handshake /ctl", "101" in ctl.status, ctl.status):
+        ctl.close()
+        ws.close()
+        print()
+        print("HASIL: kanal kontrol /ctl ditolak server.")
+        return 1
+    check("server minta ukuran (need-size)", "need-size" in first, first[:60])
     rows, cols = 45, 132
     ctl.send(('{"type":"resize","rows":%d,"cols":%d}' % (rows, cols)).encode())
     time.sleep(0.4)

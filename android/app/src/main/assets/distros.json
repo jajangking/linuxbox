@@ -1,0 +1,26 @@
+{
+  "default": "alpine",
+  "distros": [
+    {
+      "id": "alpine",
+      "label": "Alpine 3.24 (minirootfs, ringan)",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/latest-stable/releases/aarch64/alpine-minirootfs-3.24.2-aarch64.tar.gz",
+      "sha256": "",
+      "sizeBytes": 4194304
+    },
+    {
+      "id": "ubuntu-2404",
+      "label": "Ubuntu 24.04 LTS (base)",
+      "url": "https://cdimage.ubuntu.com/ubuntu-base/releases/24.04/release/ubuntu-base-24.04.5-base-arm64.tar.gz",
+      "sha256": "",
+      "sizeBytes": 30408704
+    },
+    {
+      "id": "ubuntu-2604",
+      "label": "Ubuntu 26.04.1 LTS (base)",
+      "url": "https://cdimage.ubuntu.com/ubuntu-base/releases/26.04/release/ubuntu-base-26.04.1-base-arm64.tar.gz",
+      "sha256": "",
+      "sizeBytes": 34603008
+    }
+  ]
+}
