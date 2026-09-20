@@ -21,6 +21,10 @@ MainActivity ──install──> Bootstrap (unduh/extract rootfs + proot)
                                       distro rootfs (proot --rootfs=...)
 ```
 
+- **Multi-sesi**: tiap tab terminal di browser adalah proses PTY sendiri
+  (`SessionManager`), lengkap dengan scrollback dan ukuran terminalnya. Sesi
+  tetap berjalan walau tidak ada browser yang menonton, dan otomatis hidup lagi
+  kalau shell-nya keluar.
 - **Multi-distro**: setiap distro punya direktori sendiri (`files/rootfs-<id>`) dan
   daftarnya ada di `assets/distros.json` (bisa diedit tanpa ubah kode). Distro
   aktif tersimpan di SharedPreferences.
@@ -99,6 +103,59 @@ app host di dalam guest (mis. `uid=10507`), sehingga `apk`/`apt` menolak jalan
 karena mengira bukan root dan `HOME=/root` jadi tidak konsisten. `-0` sama
 dengan `-i 0:0`: identitas **dipalsukan di dalam guest saja**, hak akses
 sebenarnya di host tetap UID aplikasi.
+
+## Multi-sesi & ketahanan
+
+### Modelnya
+
+```
+SessionManager
+ ├── s1  PtyHelper ── proot ── /bin/sh        scrollback 128 KB, rows/cols sendiri
+ ├── s2  PtyHelper ── proot ── /bin/sh        supervisor + auto-restart (backoff 1,5s→15s)
+ └── s3  ...
+```
+
+- Setiap sesi punya **supervisor sendiri**: shell yang keluar (`exit`, crash)
+  dihidupkan ulang dengan backoff, tanpa menunggu browser. Kalau sesi mati
+  kurang dari 3 detik setelah start, delay digandakan (mencegah spam restart).
+- **Sesi tidak bergantung pada client.** Browser boleh ditutup, HP boleh pindah
+  jaringan; proses di dalam sesi tetap jalan. Saat connect ulang, scrollback
+  diputar ulang sehingga isi terminal kembali utuh.
+- **Keadaan disimpan ke disk** (`files/sessions.json` + `files/sessions/<id>.scroll`,
+  ditulis tiap 20 detik dan saat sesi ditutup). Kalau Android membunuh service,
+  sesi dikembalikan dengan id dan nama yang sama.
+- **Service tahan banting**: `START_STICKY` (dihidupkan ulang dengan pengaturan
+  terakhir dari SharedPreferences), `WakeLock` + `WifiLock` supaya socket tidak
+  mati saat layar terkunci, dan `srv_wanted=false` saat start gagal total supaya
+  tidak terjadi loop restart.
+- **Keepalive**: server mengirim WebSocket PING tiap 10 detik untuk mendeteksi
+  koneksi setengah terbuka; browser juga memanggil `/healthz` tiap 15 detik
+  untuk mendeteksi server yang mati/hidup lagi.
+
+### Endpoint API
+
+| Endpoint | Kegunaan |
+|---|---|
+| `GET /healthz`, `GET /api/status` | status server: port, uptime, jumlah sesi, distro, shell, `lastError` |
+| `GET /api/sessions` | daftar sesi: id, nama, hidup/mati, jumlah penonton, ukuran |
+| `POST /api/sessions` | buat sesi baru (`?name=` opsional) |
+| `POST /api/sessions/<id>/kill` | tutup sesi |
+| `POST /api/sessions/<id>/rename?name=` | ganti nama tab |
+| `ws /ws?session=<id>` | aliran byte PTY (frame **binary**) |
+| `ws /ctl?session=<id>` | kanal kontrol: resize, `need-size`, ping |
+
+### Antarmuka web
+
+- Tab sesi di bagian atas: `+ sesi baru` untuk menambah, `×` untuk menutup,
+  klik dua kali untuk mengganti nama. Titik hijau = sesi hidup.
+- Menyambung ulang otomatis dengan backoff saat koneksi putus (pesan
+  "[sambungan putus, menyambung ulang…]"), dan mendeteksi server yang mati
+  lewat `/healthz` lalu menyambung lagi begitu server kembali.
+- Tombol: bersihkan layar, `A−`/`A+` ukuran huruf, sambung ulang, bantuan.
+- Di HP muncul baris tombol sentuh (esc, tab, `^C`, `^D`, `^Z`, panah, `/`, `|`)
+  karena keyboard virtual tidak punya tombol itu.
+- Indikator status di bawah: terhubung / menyambung ulang / server tidak
+  merespons, plus jumlah sesi, distro, dan shell.
 
 ### Kenapa `targetSdk` dipatok 28
 
@@ -272,6 +329,8 @@ memasang distro dengan versi sebelumnya, jalankan **'Pasang distro'** sekali lag
 - [x] Backup/restore rootfs satu tap (tar.gz + `.sha256`, ekspor ke Download)
 - [x] Multi-distro picker (`assets/distros.json`, rootfs per-`<id>`)
 - [x] Hardening: validasi path entry tar (Zip-slip) + symlink escape, autentikasi token
+- [x] Multi-sesi (tab terminal) + auto-restart per sesi + persistensi keadaan
+- [x] Service tahan banting (START_STICKY, WakeLock/WifiLock, keepalive PING)
 - [ ] Verifikasi tanda tangan (GPG/SHA256SUMS) saat mengunduh distro
 - [ ] Lanjutkan unduhan yang terputus (HTTP Range)
 - [ ] Enkripsi backup rootfs

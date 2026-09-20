@@ -2,13 +2,22 @@ package com.linuxbox;
 
 import android.app.Activity;
 import android.content.BroadcastReceiver;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.SharedPreferences;
+import android.graphics.Color;
 import android.graphics.Typeface;
+import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
 import android.text.InputType;
+import android.text.method.LinkMovementMethod;
+import android.text.util.Linkify;
 import android.view.Gravity;
+import android.view.View;
+import android.view.ViewGroup;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.CheckBox;
@@ -17,6 +26,7 @@ import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.Spinner;
 import android.widget.TextView;
+import android.widget.Toast;
 
 import com.linuxbox.distro.BackupManager;
 import com.linuxbox.distro.Bootstrap;
@@ -28,16 +38,30 @@ import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.util.List;
 
+/**
+ * Layar utama: pasang distro, jalankan/hentikan server, backup/restore.
+ *
+ * Perubahan UX dari versi sebelumnya:
+ *  - kartu status yang jelas: server hidup/mati, URL, jumlah sesi, terakhir
+ *    diperbarui — bukan sekadar deretan baris log.
+ *  - URL bisa disalin dan dibuka langsung; tombol dinonaktifkan saat tidak
+ *    relevan (mis. "Buka terminal" sebelum server jalan).
+ *  - pilihan port/LAN/token dan distro diingat (SharedPreferences), jadi
+ *    membuka ulang aplikasi tidak mengulang setelan dari awal.
+ */
 public class MainActivity extends Activity {
 
     private static final int DEFAULT_PORT = 8770;
     private static final int REQ_RESTORE = 4242;
+    private static final String PREFS = "linuxbox";
 
     private TextView log;
     private ScrollView scroll;
     private Button installBtn;
     private Button startBtn;
     private Button stopBtn;
+    private Button openBtn;
+    private Button copyBtn;
     private Button backupBtn;
     private Button restoreBtn;
     private EditText portView;
@@ -45,13 +69,39 @@ public class MainActivity extends Activity {
     private CheckBox authView;
     private Spinner distroView;
 
-    private final BroadcastReceiver urlReceiver = new BroadcastReceiver() {
+    private TextView stateView;
+    private TextView urlView;
+    private TextView metaView;
+
+    private volatile String currentUrl;
+    private volatile boolean running;
+
+    private final BroadcastReceiver stateReceiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context context, Intent intent) {
+            if (TermServerService.ACTION_STATE.equals(intent.getAction())) {
+                running = intent.getBooleanExtra(TermServerService.EXTRA_RUNNING, false);
+                String url = intent.getStringExtra(TermServerService.EXTRA_URL);
+                String err = intent.getStringExtra(TermServerService.EXTRA_ERROR);
+                int sessions = intent.getIntExtra(TermServerService.EXTRA_SESSIONS, 0);
+                if (url != null) currentUrl = url;
+                if (err != null && !err.isEmpty()) {
+                    append("!! " + err);
+                    showState(false, null, 0);
+                } else {
+                    showState(running, currentUrl, sessions);
+                    if (running) append("Siap: " + currentUrl);
+                }
+                return;
+            }
+            // broadcast lama (URL)
             String url = intent.getStringExtra("url");
-            if (url == null) return;
-            append("Terminal: " + url);
-            startActivity(new Intent(MainActivity.this, WebViewActivity.class).putExtra("url", url));
+            if (url != null) {
+                currentUrl = url;
+                running = true;
+                showState(true, url, 0);
+                append("Terminal: " + url);
+            }
         }
     };
 
@@ -60,48 +110,99 @@ public class MainActivity extends Activity {
         super.onCreate(savedInstanceState);
         setTitle("LinuxBox");
 
+        int pad = dp(14);
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        int pad = dp(14);
         root.setPadding(pad, pad, pad, pad);
-        root.setGravity(Gravity.CENTER_HORIZONTAL);
 
-        LinearLayout row = new LinearLayout(this);
-        row.setOrientation(LinearLayout.HORIZONTAL);
-        installBtn = new Button(this);
-        installBtn.setText("Pasang distro");
-        startBtn = new Button(this);
-        startBtn.setText("Start");
-        row.addView(installBtn, lp(1));
-        row.addView(startBtn, lp(1));
-        root.addView(row);
+        // ---- kartu status -------------------------------------------------
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setPadding(dp(12), dp(10), dp(12), dp(10));
+        card.setBackground(cardBg());
+        LinearLayout.LayoutParams cardLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        cardLp.bottomMargin = dp(12);
+        root.addView(card, cardLp);
+
+        stateView = new TextView(this);
+        stateView.setTextSize(14);
+        stateView.setTypeface(null, Typeface.BOLD);
+        card.addView(stateView);
+
+        urlView = new TextView(this);
+        urlView.setTextSize(12);
+        urlView.setTypeface(Typeface.MONOSPACE);
+        urlView.setTextIsSelectable(true);
+        urlView.setAutoLinkMask(Linkify.WEB_URLS);
+        urlView.setMovementMethod(LinkMovementMethod.getInstance());
+        urlView.setPadding(0, dp(4), 0, 0);
+        card.addView(urlView);
+
+        metaView = new TextView(this);
+        metaView.setTextSize(11);
+        metaView.setTextColor(0xFF7C8798);
+        metaView.setPadding(0, dp(4), 0, 0);
+        card.addView(metaView);
+
+        // ---- tombol utama --------------------------------------------------
+        LinearLayout row1 = new LinearLayout(this);
+        row1.setOrientation(LinearLayout.HORIZONTAL);
+        installBtn = button("Pasang distro");
+        startBtn = button("Start");
+        stopBtn = button("Stop");
+        row1.addView(installBtn, lp(1));
+        row1.addView(startBtn, lp(1));
+        row1.addView(stopBtn, lp(1));
+        root.addView(row1);
 
         LinearLayout row2 = new LinearLayout(this);
         row2.setOrientation(LinearLayout.HORIZONTAL);
-        stopBtn = new Button(this);
-        stopBtn.setText("Stop server");
-        backupBtn = new Button(this);
-        backupBtn.setText("Backup");
-        restoreBtn = new Button(this);
-        restoreBtn.setText("Restore...");
-        row2.addView(stopBtn, lp(1));
-        row2.addView(backupBtn, lp(1));
-        row2.addView(restoreBtn, lp(1));
+        row2.setPadding(0, dp(6), 0, 0);
+        openBtn = button("Buka terminal");
+        copyBtn = button("Salin URL");
+        row2.addView(openBtn, lp(1));
+        row2.addView(copyBtn, lp(1));
         root.addView(row2);
 
+        LinearLayout row2b = new LinearLayout(this);
+        row2b.setOrientation(LinearLayout.HORIZONTAL);
+        row2b.setPadding(0, dp(6), 0, 0);
+        backupBtn = button("Backup");
+        restoreBtn = button("Restore…");
+        row2b.addView(backupBtn, lp(1));
+        row2b.addView(restoreBtn, lp(1));
+        root.addView(row2b);
+
+        // ---- opsi ----------------------------------------------------------
         LinearLayout row3 = new LinearLayout(this);
         row3.setOrientation(LinearLayout.HORIZONTAL);
+        row3.setPadding(0, dp(10), 0, 0);
         portView = new EditText(this);
-        portView.setText(String.valueOf(DEFAULT_PORT));
+        portView.setText(String.valueOf(prefs().getInt("port", DEFAULT_PORT)));
         portView.setInputType(InputType.TYPE_CLASS_NUMBER);
-        lanView = new CheckBox(this);
-        lanView.setText("LAN");
-        authView = new CheckBox(this);
-        authView.setText("Token");
+        portView.setHint("port");
+        lanView = check("LAN");
+        lanView.setChecked(prefs().getBoolean("lan", false));
+        authView = check("Token");
+        authView.setChecked(prefs().getBoolean("auth", false));
         row3.addView(portView, lp(1));
         row3.addView(lanView, lp(1));
         row3.addView(authView, lp(1));
         root.addView(row3);
+
+        lanView.setOnCheckedChangeListener((b, checked) -> {
+            // terminal yang terbuka ke LAN wajib ber-token
+            if (checked) authView.setChecked(true);
+        });
+
+        // ---- distro --------------------------------------------------------
+        TextView distroLabel = new TextView(this);
+        distroLabel.setText("Distro");
+        distroLabel.setTextSize(11);
+        distroLabel.setTextColor(0xFF7C8798);
+        distroLabel.setPadding(0, dp(10), 0, dp(2));
+        root.addView(distroLabel);
 
         distroView = new Spinner(this);
         List<DistroCatalog.Distro> distros = DistroCatalog.load(this);
@@ -114,85 +215,97 @@ public class MainActivity extends Activity {
             if (distros.get(i).id.equals(active)) distroView.setSelection(i);
         }
         root.addView(distroView, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        // ---- log -----------------------------------------------------------
+        TextView logLabel = new TextView(this);
+        logLabel.setText("Log");
+        logLabel.setTextSize(11);
+        logLabel.setTextColor(0xFF7C8798);
+        logLabel.setPadding(0, dp(10), 0, dp(2));
+        root.addView(logLabel);
 
         log = new TextView(this);
         log.setTypeface(Typeface.MONOSPACE);
-        log.setTextSize(12);
-        log.setPadding(0, dp(12), 0, 0);
+        log.setTextSize(11);
         log.setTextColor(0xFFC8C8C8);
+        log.setBackground(logBg());
+        log.setPadding(dp(8), dp(8), dp(8), dp(8));
         root.addView(log);
 
         scroll = new ScrollView(this);
         scroll.addView(root, new ScrollView.LayoutParams(
-                ScrollView.LayoutParams.MATCH_PARENT, ScrollView.LayoutParams.WRAP_CONTENT));
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         setContentView(scroll);
 
         installBtn.setOnClickListener(v -> install());
         startBtn.setOnClickListener(v -> startServer());
         stopBtn.setOnClickListener(v -> stopServer());
+        openBtn.setOnClickListener(v -> openTerminal());
+        copyBtn.setOnClickListener(v -> copyUrl());
         backupBtn.setOnClickListener(v -> backup());
         restoreBtn.setOnClickListener(v -> pickBackup());
 
-        append("LinuxBox");
-        append("  home   : " + getFilesDir().getAbsolutePath());
-        append("  distro : " + DistroCatalog.activeId(this));
-        append("  rootfs : " + ProotSession.activeRootfsDir(this).getAbsolutePath());
-        append("  shell  : " + ProotSession.detectShell(ProotSession.activeRootfsDir(this)));
-        append("Pilih distro lalu 'Pasang distro'. Setelah itu 'Start'.");
-    }
+        showState(false, null, 0);
+        refreshInfo();
 
-    @Override
-    protected void onStart() {
-        super.onStart();
-        registerReceiver(urlReceiver, new IntentFilter("com.linuxbox.URL"));
-    }
-
-    @Override
-    protected void onStop() {
-        try {
-            unregisterReceiver(urlReceiver);
-        } catch (Exception ignored) {
+        append("LinuxBox siap.");
+        if (prefs().getBoolean("srv_wanted", false)) {
+            append("(server terakhir kali menyala — tekan Start untuk menjalankan lagi)");
         }
-        super.onStop();
     }
 
-    @Override
-    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
-        super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode == REQ_RESTORE && resultCode == RESULT_OK && data != null
-                && data.getData() != null) {
-            android.net.Uri uri = data.getData();
-            append("-- restore dari " + uri.getLastPathSegment());
-            busy(new Runnable() {
-                @Override
-                public void run() {
-                    File tmp = new File(getCacheDir(), "restore-" + System.currentTimeMillis() + ".tar.gz");
-                    try {
-                        InputStream in = getContentResolver().openInputStream(uri);
-                        if (in == null) throw new java.io.IOException("berkas tidak bisa dibuka");
-                        FileOutputStream out = new FileOutputStream(tmp);
-                        byte[] buf = new byte[1 << 16];
-                        int n;
-                        long total = 0;
-                        while ((n = in.read(buf)) > 0) {
-                            out.write(buf, 0, n);
-                            total += n;
-                        }
-                        out.close();
-                        in.close();
-                        append("  disalin " + (total / (1024 * 1024)) + " MB");
-                        BackupManager.importRootfs(MainActivity.this, tmp, MainActivity.this::append);
-                        append("-- selesai. Start ulang server untuk memakai rootfs baru.");
-                    } catch (Throwable t) {
-                        append("!! GAGAL: " + t.getMessage());
-                        t.printStackTrace();
-                    } finally {
-                        tmp.delete();
-                    }
-                }
-            });
-        }
+    // ---------------------------------------------------------------- UI
+
+    private Button button(String text) {
+        Button b = new Button(this);
+        b.setText(text);
+        b.setAllCaps(false);
+        b.setPadding(dp(6), 0, dp(6), 0);
+        return b;
+    }
+
+    private CheckBox check(String text) {
+        CheckBox c = new CheckBox(this);
+        c.setText(text);
+        return c;
+    }
+
+    private GradientDrawable cardBg() {
+        GradientDrawable d = new GradientDrawable();
+        d.setColor(0xFF11151F);
+        d.setCornerRadius(dp(8));
+        d.setStroke(Math.max(1, dp(1)), 0xFF1B2230);
+        return d;
+    }
+
+    private GradientDrawable logBg() {
+        GradientDrawable d = new GradientDrawable();
+        d.setColor(0xFF0E1219);
+        d.setCornerRadius(dp(6));
+        d.setStroke(Math.max(1, dp(1)), 0xFF1B2230);
+        return d;
+    }
+
+    private void showState(final boolean isRunning, final String url, final int sessions) {
+        runOnUiThread(() -> {
+            running = isRunning;
+            if (isRunning) {
+                stateView.setText("● Server aktif");
+                stateView.setTextColor(0xFF4EC9B0);
+            } else {
+                stateView.setText("○ Server berhenti");
+                stateView.setTextColor(0xFF7C8798);
+            }
+            urlView.setText(url != null ? url : "—");
+            String info = DistroCatalog.activeId(MainActivity.this) + " · "
+                    + ProotSession.detectShell(ProotSession.activeRootfsDir(MainActivity.this));
+            if (sessions > 0) info += " · " + sessions + " sesi";
+            metaView.setText(info);
+            openBtn.setEnabled(isRunning);
+            copyBtn.setEnabled(url != null);
+            stopBtn.setEnabled(isRunning);
+        });
     }
 
     private int dp(int v) {
@@ -210,31 +323,47 @@ public class MainActivity extends Activity {
         });
     }
 
-    /** Jalankan tugas berat di thread latar sambil menonaktifkan tombol. */
-    private void busy(final Runnable task) {
-        setButtons(false);
-        new Thread(() -> {
-            try {
-                task.run();
-            } finally {
-                runOnUiThread(() -> setButtons(true));
-            }
-        }, "linuxbox-task").start();
+    private SharedPreferences prefs() {
+        return getSharedPreferences(PREFS, MODE_PRIVATE);
     }
 
-    private void setButtons(boolean enabled) {
-        runOnUiThread(() -> {
-            installBtn.setEnabled(enabled);
-            startBtn.setEnabled(enabled);
-            stopBtn.setEnabled(enabled);
-            backupBtn.setEnabled(enabled);
-            restoreBtn.setEnabled(enabled);
-        });
+    // ---------------------------------------------------------------- aksi
+
+    @Override
+    protected void onStart() {
+        super.onStart();
+        IntentFilter f = new IntentFilter(TermServerService.ACTION_STATE);
+        f.addAction("com.linuxbox.URL");
+        registerReceiver(stateReceiver, f);
+    }
+
+    @Override
+    protected void onStop() {
+        try {
+            unregisterReceiver(stateReceiver);
+        } catch (Exception ignored) {
+        }
+        prefs().edit()
+                .putInt("port", portNumber())
+                .putBoolean("lan", lanView.isChecked())
+                .putBoolean("auth", authView.isChecked())
+                .apply();
+        super.onStop();
+    }
+
+    private int portNumber() {
+        try {
+            int p = Integer.parseInt(portView.getText().toString());
+            if (p >= 1024 && p <= 65535) return p;
+        } catch (NumberFormatException ignored) {
+        }
+        return DEFAULT_PORT;
     }
 
     private DistroCatalog.Distro selectedDistro() {
         Object o = distroView.getSelectedItem();
-        return o instanceof DistroCatalog.Distro ? (DistroCatalog.Distro) o : DistroCatalog.current(this);
+        return o instanceof DistroCatalog.Distro
+                ? (DistroCatalog.Distro) o : DistroCatalog.current(this);
     }
 
     private void install() {
@@ -251,6 +380,63 @@ public class MainActivity extends Activity {
                 t.printStackTrace();
             }
         });
+    }
+
+    private void startServer() {
+        String distro = DistroCatalog.activeId(this);
+        if (!DistroCatalog.isInstalled(this, distro)) {
+            append("!! Distro " + distro + " belum terpasang. Tap 'Pasang distro' dulu.");
+            Toast.makeText(this, "Pasang distro dulu", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        if (!ProotSession.ptyBin(ProotSession.nativeLibraryDir(this)).exists()) {
+            append("!! ptylauncher belum ada. Jalankan 'Pasang distro'.");
+            return;
+        }
+        boolean lan = lanView.isChecked();
+        boolean auth = authView.isChecked();
+        Intent intent = new Intent(this, TermServerService.class)
+                .putExtra("port", portNumber())
+                .putExtra("lan", lan)
+                .putExtra("auth", auth);
+        try {
+            startForegroundService(intent);
+        } catch (Exception e) {
+            // Android 12+ menolak start dari latar belakang; fallback
+            try {
+                startService(intent);
+            } catch (Exception e2) {
+                append("!! tidak bisa memulai service: " + e2.getMessage());
+                return;
+            }
+        }
+        append("Memulai server web terminal..."
+                + (lan ? " (LAN: wajib token)" : (auth ? " (token aktif)" : "")));
+    }
+
+    private void stopServer() {
+        try {
+            startService(new Intent(this, TermServerService.class)
+                    .setAction(TermServerService.ACTION_STOP));
+        } catch (Exception ignored) {
+        }
+        currentUrl = null;
+        showState(false, null, 0);
+    }
+
+    private void openTerminal() {
+        if (currentUrl == null) {
+            Toast.makeText(this, "Server belum jalan", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        startActivity(new Intent(this, WebViewActivity.class).putExtra("url", currentUrl));
+    }
+
+    private void copyUrl() {
+        if (currentUrl == null) return;
+        ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+        if (cm != null) cm.setPrimaryClip(ClipData.newPlainText("LinuxBox URL", currentUrl));
+        Toast.makeText(this, "URL disalin", Toast.LENGTH_SHORT).show();
     }
 
     private void backup() {
@@ -278,47 +464,80 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void startServer() {
-        int port;
-        try {
-            port = Integer.parseInt(portView.getText().toString());
-            if (port < 1024 || port > 65535) port = DEFAULT_PORT;
-        } catch (NumberFormatException e) {
-            port = DEFAULT_PORT;
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == REQ_RESTORE && resultCode == RESULT_OK && data != null
+                && data.getData() != null) {
+            android.net.Uri uri = data.getData();
+            append("-- restore dari " + uri.getLastPathSegment());
+            busy(() -> {
+                File tmp = new File(getCacheDir(), "restore-" + System.currentTimeMillis() + ".tar.gz");
+                try {
+                    InputStream in = getContentResolver().openInputStream(uri);
+                    if (in == null) throw new java.io.IOException("berkas tidak bisa dibuka");
+                    FileOutputStream out = new FileOutputStream(tmp);
+                    byte[] buf = new byte[1 << 16];
+                    int n;
+                    long total = 0;
+                    while ((n = in.read(buf)) > 0) {
+                        out.write(buf, 0, n);
+                        total += n;
+                    }
+                    out.close();
+                    in.close();
+                    append("  disalin " + (total / (1024 * 1024)) + " MB");
+                    BackupManager.importRootfs(MainActivity.this, tmp, MainActivity.this::append);
+                    append("-- selesai. Start ulang server untuk memakai rootfs baru.");
+                } catch (Throwable t) {
+                    append("!! GAGAL: " + t.getMessage());
+                    t.printStackTrace();
+                } finally {
+                    tmp.delete();
+                }
+            });
         }
-        boolean lan = lanView.isChecked();
-        boolean auth = authView.isChecked();
-
-        String distro = DistroCatalog.activeId(this);
-        if (!DistroCatalog.isInstalled(this, distro)) {
-            append("!! Distro " + distro + " belum terpasang. Tap 'Pasang distro' dulu.");
-            return;
-        }
-        if (!ProotSession.ptyBin(ProotSession.nativeLibraryDir(this)).exists()) {
-            append("!! ptylauncher belum ada. Jalankan 'Pasang distro'.");
-            return;
-        }
-        Intent intent = new Intent(this, TermServerService.class)
-                .putExtra("port", port)
-                .putExtra("lan", lan)
-                .putExtra("auth", auth);
-        startForegroundService(intent);
-        append("Memulai server web terminal..."
-                + (lan ? " (LAN: wajib token)" : (auth ? " (token aktif)" : "")));
     }
 
-    private void stopServer() {
-        try {
-            startService(new Intent(this, TermServerService.class).putExtra("stop", true));
-        } catch (Exception ignored) {
-        }
+    private void busy(final Runnable task) {
+        setButtons(false);
+        new Thread(() -> {
+            try {
+                task.run();
+            } finally {
+                runOnUiThread(() -> setButtons(true));
+            }
+        }, "linuxbox-task").start();
+    }
+
+    private void setButtons(boolean enabled) {
+        runOnUiThread(() -> {
+            installBtn.setEnabled(enabled);
+            startBtn.setEnabled(enabled);
+            backupBtn.setEnabled(enabled);
+            restoreBtn.setEnabled(enabled);
+        });
     }
 
     private void refreshInfo() {
         runOnUiThread(() -> {
+            String info = DistroCatalog.activeId(this) + " · "
+                    + ProotSession.detectShell(ProotSession.activeRootfsDir(this));
+            metaView.setText(info);
             append("  distro : " + DistroCatalog.activeId(this));
             append("  rootfs : " + ProotSession.activeRootfsDir(this).getAbsolutePath());
             append("  shell  : " + ProotSession.detectShell(ProotSession.activeRootfsDir(this)));
         });
+    }
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+    }
+
+    /** Dipanggil saat tombol kembali ditekan: biarkan server tetap jalan. */
+    @Override
+    public void onBackPressed() {
+        moveTaskToBack(true);
     }
 }

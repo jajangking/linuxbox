@@ -4,10 +4,8 @@ import android.content.Context;
 
 import com.linuxbox.distro.DistroCatalog;
 import com.linuxbox.distro.ProotSession;
-import com.linuxbox.distro.PtyHelper;
 
 import java.io.ByteArrayOutputStream;
-import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -23,20 +21,26 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * Server terminal web mandiri: HTTP statis + WebSocket (subset RFC6455),
- * melayani index.html/xterm.js dan relay byte PTY <-> client.
+ * Server terminal web mandiri: HTTP statis + API + WebSocket (subset RFC6455).
  *
- * Beberapa aturan penting yang dulu bikin "command tidak tampil":
- *  - output PTY dikirim sebagai frame BINARY (0x2), bukan TEXT (0x1).
- *    Frame text wajib UTF-8 valid; sekali saja output mengandung byte non-UTF-8
- *    (atau karakter multibyte yang kepotong di batas read 8192 byte) browser
- *    MEMUTUS koneksi websocket-nya (RFC6455) dan terminal berhenti menampilkan apa pun.
- *  - output terakhir disimpan di buffer scrollback dan diputar ulang ke client
- *    yang baru connect. Dulu prompt/banner hilang begitu saja karena shell sudah
- *    jalan sebelum browser sempat connect -> terminal terlihat mati/blank.
- *  - sesi shell diawasi dan dimulai ulang kalau mati (mis. /bin/bash tidak ada
- *    di alpine). Dulu sekali shell mati, server tetap hidup tapi terminal bisu
- *    selamanya.
+ * Endpoint:
+ *   GET  /                       halaman terminal (multi-tab)
+ *   GET  /healthz, /api/status   status server + sesi (JSON)
+ *   GET  /api/sessions           daftar sesi
+ *   POST /api/sessions           buat sesi baru (?name=opsional)
+ *   POST /api/sessions/<id>/kill tutup sesi
+ *   POST /api/sessions/<id>/rename?name=...
+ *   ws   /ws?session=<id>        aliran byte PTY (frame BINARY)
+ *   ws   /ctl?session=<id>       kanal kontrol (resize, need-size)
+ *
+ * Aturan penting yang dulu bikin "command tidak tampil":
+ *  - output PTY dikirim sebagai frame BINARY (0x2), bukan TEXT (0x1). Frame
+ *    text wajib UTF-8 valid; sekali saja output mengandung byte non-UTF-8
+ *    (atau karakter multibyte yang kepotong di batas buffer) browser MEMUTUS
+ *    websocket-nya (RFC6455) dan terminal berhenti menampilkan apa pun.
+ *  - setiap sesi punya scrollback sendiri yang diputar ulang ke client yang
+ *    connect (ulang), jadi prompt/banner tidak hilang.
+ *  - sesi diawasi dan dihidupkan ulang oleh SessionManager kalau shell mati.
  */
 public class WebTerminalServer {
 
@@ -49,26 +53,23 @@ public class WebTerminalServer {
     private static final int OP_PING = 0x9;
     private static final int OP_PONG = 0xA;
 
-    /** Endpoint websocket kontrol (JSON): resize PTY, dsb. Terpisah dari /ws
-     *  supaya perintah kontrol tidak pernah tercampur dengan ketikan user. */
     private static final String CONTROL_PATH = "/ctl";
     private static final String CONTROL_NEED_SIZE = "{\"type\":\"need-size\"}";
+    private static final String CONTROL_PONG = "{\"type\":\"pong\"}";
 
-    private static final int SCROLLBACK_MAX = 256 * 1024;
-    private static final long RESTART_MIN_DELAY_MS = 1500L;
-    private static final long RESTART_MAX_DELAY_MS = 15000L;
+    /** Interval ping: mendeteksi socket setengah terbuka (HP pindah jaringan). */
+    private static final long PING_INTERVAL_MS = 10000L;
+    private static final byte[] EMPTY = new byte[0];
 
     private final Context ctx;
     private final AtomicBoolean running = new AtomicBoolean(true);
     private final ConcurrentHashMap<Socket, Client> clients = new ConcurrentHashMap<>();
-    private final Object sessionLock = new Object();
-    private final Scrollback scrollback = new Scrollback(SCROLLBACK_MAX);
+    private final SessionManager sessions;
+    private final long startedAt = System.currentTimeMillis();
 
-    private volatile PtyHelper pty;
-    private volatile String lastError;
-    private final ServerSocket server;
     /** null/kosong = tanpa autentikasi (mode localhost). */
     private final String token;
+    private final ServerSocket server;
 
     public WebTerminalServer(Context ctx, int port, boolean lan) throws IOException {
         this(ctx, port, lan, null);
@@ -76,13 +77,15 @@ public class WebTerminalServer {
 
     public WebTerminalServer(Context ctx, int port, boolean lan, String token) throws IOException {
         this.token = token;
-        this.ctx = ctx;
+        this.ctx = ctx.getApplicationContext();
+        this.sessions = new SessionManager(ctx);
         this.server = new ServerSocket();
         server.setReuseAddress(true);
         InetAddress addr = InetAddress.getByName(lan ? "0.0.0.0" : "127.0.0.1");
         try {
             server.bind(new InetSocketAddress(addr, port));
         } catch (java.net.BindException e) {
+            // port sibuk (server lama belum mati): pakai port acak agar tetap jalan
             server.bind(new InetSocketAddress(addr, 0));
         }
     }
@@ -91,43 +94,42 @@ public class WebTerminalServer {
         return server.getLocalPort();
     }
 
+    public SessionManager sessions() {
+        return sessions;
+    }
+
     public void start() throws Exception {
-        // fail-fast: kalau proot/rootfs/ptylauncher bermasalah, exception ini
-        // sampai ke TermServerService dan ditampilkan ke user (bukan layar blank).
-        PtyHelper first = openSession();
-        synchronized (sessionLock) {
-            pty = first;
-        }
-        new Thread(() -> sessionLoop(first), "tt-session").start();
+        sessions.restore();
+        sessions.startPersistThread();
         new Thread(this::acceptLoop, "tt-accept").start();
+        new Thread(this::heartbeatLoop, "tt-hb").start();
     }
 
     public void stop() {
         running.set(false);
         for (Client c : clients.values()) {
-            closeQuietly(c);
+            try { c.socket.close(); } catch (IOException ignored) {}
         }
         clients.clear();
-        synchronized (sessionLock) {
-            if (pty != null) pty.close();
-            pty = null;
-        }
+        sessions.closeAll();
         try { server.close(); } catch (IOException ignored) {}
     }
 
-    /** Ringkasan status buatan /healthz — berguna saat debugging dari laptop. */
+    /** Ringkasan status untuk /healthz dan UI (bisa dibuka dari laptop). */
     public String statusJson() {
-        PtyHelper p = pty;
         StringBuilder sb = new StringBuilder();
         sb.append("{\"running\":").append(running.get())
                 .append(",\"port\":").append(getBoundPort())
-                .append(",\"sessionAlive\":").append(p != null && p.isAlive())
+                .append(",\"uptime\":").append((System.currentTimeMillis() - startedAt) / 1000L)
+                .append(",\"sessions\":").append(sessions.list().size())
+                .append(",\"sessionsAlive\":").append(sessions.aliveCount())
                 .append(",\"clients\":").append(clients.size())
-                .append(",\"resize\":").append(p != null && p.hasControl())
+                .append(",\"resize\":true")
                 .append(",\"auth\":").append(token != null && !token.isEmpty())
                 .append(",\"distro\":\"").append(DistroCatalog.activeId(ctx)).append('"')
-                .append(",\"shell\":\"").append(ProotSession.detectShell(ProotSession.activeRootfsDir(ctx))).append('"');
-        String err = lastError;
+                .append(",\"shell\":\"")
+                .append(ProotSession.detectShell(ProotSession.activeRootfsDir(ctx))).append('"');
+        String err = firstError();
         if (err != null) {
             sb.append(",\"lastError\":\"").append(err.replace("\"", "'").replace("\n", " ")).append('"');
         }
@@ -135,108 +137,11 @@ public class WebTerminalServer {
         return sb.toString();
     }
 
-    // ---------- sesi PTY: diawasi + auto restart ----------
-
-    private PtyHelper openSession() throws Exception {
-        File dir = ctx.getFilesDir();
-        String nativeLibDir = ProotSession.nativeLibraryDir(ctx);
-        File rootfs = ProotSession.activeRootfsDir(ctx);
-        PtyHelper p = PtyHelper.start(dir, nativeLibDir, rootfs,
-                ProotSession.buildCommand(nativeLibDir, rootfs),
-                ProotSession.environment(dir, nativeLibDir, rootfs));
-        lastError = null;
-        return p;
-    }
-
-    private void sessionLoop(PtyHelper current) {
-        long delay = RESTART_MIN_DELAY_MS;
-        while (running.get()) {
-            PtyHelper p = current;
-            current = null;
-
-            if (p == null) {
-                long startedAt = System.currentTimeMillis();
-                try {
-                    p = openSession();
-                    synchronized (sessionLock) {
-                        pty = p;
-                    }
-                    delay = RESTART_MIN_DELAY_MS;
-                    broadcast(bytes("\r\n[sesi shell baru dimulai: "
-                            + ProotSession.detectShell(ProotSession.activeRootfsDir(ctx)) + "]\r\n"));
-                    broadcastControl(CONTROL_NEED_SIZE);
-                } catch (Exception e) {
-                    lastError = String.valueOf(e.getMessage());
-                    synchronized (sessionLock) {
-                        pty = null;
-                    }
-                    broadcast(bytes("\r\n[gagal memulai sesi: " + lastError + "]\r\n"
-                            + "[mencoba lagi " + (delay / 1000) + "s]\r\n"));
-                    sleepQuietly(delay);
-                    delay = Math.min(delay * 2, RESTART_MAX_DELAY_MS);
-                    continue;
-                }
-                // kalau sesi langsung mati (<3 detik) -> anggap gagal, pakai backoff
-                if (!p.isAlive() && System.currentTimeMillis() - startedAt < 3000L) {
-                    delay = Math.min(delay * 2, RESTART_MAX_DELAY_MS);
-                }
-            }
-
-            pumpSession(p);
-
-            synchronized (sessionLock) {
-                if (pty == p) pty = null;
-            }
-            try { p.close(); } catch (Exception ignored) {}
-
-            if (!running.get()) break;
-            broadcast(bytes("\r\n[sesi shell berakhir, memulai ulang...]\r\n"));
-            sleepQuietly(delay);
-            delay = Math.min(delay * 2, RESTART_MAX_DELAY_MS);
+    private String firstError() {
+        for (SessionManager.Session s : sessions.list()) {
+            if (s.lastError != null && !s.lastError.isEmpty()) return s.lastError;
         }
-    }
-
-    /** Baca output PTY sampai EOF (shell keluar), sambil terus menyiarkan ke client. */
-    private void pumpSession(PtyHelper p) {
-        Thread errThread = new Thread(() -> pump(p.getError(), 512), "tt-stderr");
-        errThread.setDaemon(true);
-        errThread.start();
-        pump(p.getOutput(), 8192);
-    }
-
-    private void pump(InputStream in, int bufSize) {
-        byte[] buf = new byte[bufSize];
-        try {
-            int n;
-            while (running.get() && (n = in.read(buf)) >= 0) {
-                if (n > 0) {
-                    scrollback.add(buf, n);
-                    broadcast(buf, n);
-                }
-            }
-        } catch (IOException ignored) {
-        }
-    }
-
-    // ---------- relay PTY -> broadcast ----------
-
-    private void broadcast(byte[] data) {
-        broadcast(data, data.length);
-    }
-
-    private void broadcast(byte[] data, int len) {
-        for (Client c : clients.values()) {
-            if (c.control) continue;  // /ctl hanya untuk pesan kontrol, bukan output PTY
-            synchronized (c.writeLock) {
-                try {
-                    // BINARY frame: byte PTY mentah boleh apa saja, tidak wajib UTF-8.
-                    writeFrame(c.out, OP_BINARY, data, len);
-                } catch (IOException ex) {
-                    clients.remove(c.socket);
-                    closeQuietly(c);
-                }
-            }
-        }
+        return null;
     }
 
     // ---------- accept loop ----------
@@ -253,6 +158,30 @@ public class WebTerminalServer {
         }
     }
 
+    private void heartbeatLoop() {
+        while (running.get()) {
+            sleepQuietly(PING_INTERVAL_MS);
+            if (!running.get()) break;
+            for (Client c : clients.values()) {
+                if (c.dead) {
+                    clients.remove(c.socket);
+                    if (c.session != null) sessions.detach(c.session, c);
+                    closeQuietly(c);
+                    continue;
+                }
+                synchronized (c.writeLock) {
+                    try {
+                        writeFrame(c.out, OP_PING, EMPTY, 0);
+                    } catch (IOException e) {
+                        c.dead = true;
+                    }
+                }
+            }
+        }
+    }
+
+    // ---------- HTTP ----------
+
     private void handle(Socket sock) {
         Client client = null;
         try {
@@ -267,6 +196,7 @@ public class WebTerminalServer {
             String target = parts.length > 1 ? parts[1] : "/";
             int qm = target.indexOf('?');
             String path = qm >= 0 ? target.substring(0, qm) : target;
+            if (path.length() > 1 && path.endsWith("/")) path = path.substring(0, path.length() - 1);
 
             Map<String, String> headers = new ConcurrentHashMap<>();
             String line;
@@ -281,24 +211,100 @@ public class WebTerminalServer {
                 return;
             }
 
-            if ("/healthz".equals(path)) {
-                serveHealth(output);
-            } else if (!method.equals("GET")) {
-                httpError(output, 405);
+            // POST: buang body supaya sisa request tidak mengotori koneksi
+            int contentLength = 0;
+            try {
+                contentLength = Integer.parseInt(String.valueOf(headers.get("content-length")));
+            } catch (Exception ignored) {
+                contentLength = 0;
+            }
+            if (contentLength > 0) skip(input, contentLength);
+
+            if ("/healthz".equals(path) || "/api/status".equals(path)) {
+                serveJson(output, statusJson());
+            } else if ("/api/sessions".equals(path)) {
+                if ("POST".equals(method)) {
+                    String name = queryParam(target, "name");
+                    try {
+                        SessionManager.Session s = sessions.create(name);
+                        serveJson(output, "{\"id\":\"" + s.id + "\",\"name\":\""
+                                + SessionManager.sanitize(s.displayName(), s.id) + "\"}");
+                    } catch (IOException e) {
+                        serveJson(output, "{\"error\":\"" + String.valueOf(e.getMessage())
+                                .replace("\"", "'") + "\"}", 503);
+                    }
+                } else {
+                    serveJson(output, sessions.sessionsJson());
+                }
+            } else if (path.startsWith("/api/sessions/")) {
+                handleSessionAction(path, target, method, output);
             } else if ("websocket".equalsIgnoreCase(headers.get("upgrade"))) {
-                client = doWebSocket(sock, input, output, headers, CONTROL_PATH.equals(path));
+                client = doWebSocket(sock, input, output, headers, target, path);
                 if (client != null) wsLoop(input, client);
-            } else if (path.equals("/ws")) {
+            } else if ("/ws".equals(path) || "/ctl".equals(path)) {
                 httpError(output, 400, "websocket upgrade expected");
+            } else if (!"GET".equals(method) && !"HEAD".equals(method)) {
+                httpError(output, 405);
             } else {
                 serveStatic(path, output);
             }
         } catch (IOException ignored) {
         } catch (RuntimeException ignored) {
         } finally {
-            if (client != null) clients.remove(client.socket);
+            if (client != null) {
+                clients.remove(client.socket);
+                if (client.session != null) sessions.detach(client.session, client);
+            }
             try { sock.close(); } catch (IOException ignored) {}
         }
+    }
+
+    private void handleSessionAction(String path, String target, String method,
+                                     OutputStream output) throws IOException {
+        String rest = path.substring("/api/sessions/".length());
+        String[] seg = rest.split("/");
+        String id = seg.length > 0 ? seg[0] : "";
+        String action = seg.length > 1 ? seg[1] : "";
+        SessionManager.Session s = sessions.get(id);
+        if (s == null) {
+            serveJson(output, "{\"error\":\"sesi tidak ada\"}", 404);
+            return;
+        }
+        if ("kill".equals(action) || "DELETE".equals(method)) {
+            sessions.kill(id);
+            serveJson(output, "{\"ok\":true}");
+            return;
+        }
+        if ("rename".equals(action)) {
+            String name = queryParam(target, "name");
+            s.name = SessionManager.sanitize(name, s.id);
+            sessions.persist();
+            serveJson(output, "{\"ok\":true,\"name\":\"" + s.displayName() + "\"}");
+            return;
+        }
+        if ("resize".equals(action)) {
+            sessions.resize(s, jsonInt(queryParam(target, "rows"), -1),
+                    jsonInt(queryParam(target, "cols"), -1));
+            serveJson(output, "{\"ok\":true}");
+            return;
+        }
+        serveJson(output, "{\"id\":\"" + s.id + "\",\"name\":\"" + s.displayName()
+                + "\",\"alive\":" + s.alive + ",\"rows\":" + s.rows + ",\"cols\":" + s.cols + "}");
+    }
+
+    private void serveJson(OutputStream output, String json) throws IOException {
+        serveJson(output, json, 200);
+    }
+
+    private void serveJson(OutputStream output, String json, int code) throws IOException {
+        byte[] body = json.getBytes(StandardCharsets.UTF_8);
+        output.write(("HTTP/1.1 " + code + " " + (code == 200 ? "OK" : "Error") + "\r\n" +
+                "Content-Type: application/json; charset=utf-8\r\n" +
+                "Content-Length: " + body.length + "\r\n" +
+                "Cache-Control: no-store\r\n" +
+                "Connection: close\r\n\r\n").getBytes(StandardCharsets.UTF_8));
+        output.write(body);
+        output.flush();
     }
 
     /** Halaman 401 yang menjelaskan apa yang harus dilakukan (bukan layar kosong). */
@@ -312,22 +318,10 @@ public class WebTerminalServer {
                 + "<p>Buka URL <b>lengkap</b> yang ada di notifikasi atau log LinuxBox "
                 + "(ada <code>?token=...</code>-nya), atau matikan opsi <b>Token</b> "
                 + "di aplikasi lalu start ulang server.</p></body></html>");
-        output.write(("HTTP/1.1 401 Unauthorized\r\n" +
-                "Content-Type: text/html; charset=utf-8\r\n" +
-                "Content-Length: " + body.length + "\r\n" +
-                "Cache-Control: no-store\r\n" +
-                "Connection: close\r\n\r\n").getBytes(StandardCharsets.UTF_8));
-        output.write(body);
-        output.flush();
-    }
-
-    private void serveHealth(OutputStream output) throws IOException {
-        byte[] body = statusJson().getBytes(StandardCharsets.UTF_8);
-        output.write(("HTTP/1.1 200 OK\r\n" +
-                "Content-Type: application/json; charset=utf-8\r\n" +
-                "Content-Length: " + body.length + "\r\n" +
-                "Cache-Control: no-store\r\n" +
-                "Connection: close\r\n\r\n").getBytes(StandardCharsets.UTF_8));
+        output.write(("HTTP/1.1 401 Unauthorized\r\nContent-Type: text/html; charset=utf-8\r\n"
+                + "Content-Length: " + body.length + "\r\n"
+                + "Cache-Control: no-store\r\nConnection: close\r\n\r\n")
+                .getBytes(StandardCharsets.UTF_8));
         output.write(body);
         output.flush();
     }
@@ -337,8 +331,8 @@ public class WebTerminalServer {
     }
 
     private void httpError(OutputStream output, int code, String reason) throws IOException {
-        output.write(("HTTP/1.1 " + code + " " + reason + "\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-                .getBytes(StandardCharsets.UTF_8));
+        output.write(("HTTP/1.1 " + code + " " + reason + "\r\nContent-Length: 0\r\n"
+                + "Connection: close\r\n\r\n").getBytes(StandardCharsets.UTF_8));
         output.flush();
     }
 
@@ -350,6 +344,16 @@ public class WebTerminalServer {
             if (b != '\r') buf.write(b);
         }
         return buf.size() == 0 ? null : new String(buf.toByteArray(), StandardCharsets.UTF_8);
+    }
+
+    private void skip(InputStream input, int n) throws IOException {
+        int left = n;
+        byte[] buf = new byte[4096];
+        while (left > 0) {
+            int r = input.read(buf, 0, Math.min(buf.length, left));
+            if (r < 0) return;
+            left -= r;
+        }
     }
 
     private boolean readFully(InputStream input, byte[] buf) throws IOException {
@@ -365,7 +369,8 @@ public class WebTerminalServer {
     // ---------- web socket ----------
 
     private Client doWebSocket(Socket sock, InputStream input, OutputStream output,
-                               Map<String, String> headers, boolean control) throws IOException {
+                               Map<String, String> headers, String target, String path)
+            throws IOException {
         String key = headers.get("sec-websocket-key");
         if (key == null) {
             httpError(output, 400, "missing Sec-WebSocket-Key");
@@ -386,34 +391,43 @@ public class WebTerminalServer {
                 "Sec-WebSocket-Accept: " + accept + "\r\n\r\n").getBytes(StandardCharsets.UTF_8));
         output.flush();
 
+        boolean control = CONTROL_PATH.equals(path);
         Client client = new Client(sock, output, control);
+        client.session = resolveSession(target, control);
         clients.put(sock, client);
-
-        if (control) {
-            // terminal baru connect: minta ukuran sebenarnya (bukan tebakan 80x24)
-            sendControl(client, CONTROL_NEED_SIZE);
-            return client;
-        }
-
-        // putar ulang output terakhir supaya client yang connect belakangan
-        // langsung melihat prompt/banner, bukan layar kosong.
-        byte[] history = scrollback.snapshot();
-        if (history.length > 0) {
-            synchronized (client.writeLock) {
-                try {
-                    writeFrame(client.out, OP_BINARY, history, history.length);
-                } catch (IOException ignored) {
-                }
+        if (client.session != null) {
+            sessions.attach(client.session, client);
+            if (control) {
+                sessions.requestSize(client.session);
+            } else {
+                byte[] history = sessions.snapshot(client.session);
+                if (history.length > 0) client.sendBinary(history, history.length);
             }
         }
         return client;
+    }
+
+    private SessionManager.Session resolveSession(String target, boolean control) {
+        String id = queryParam(target, "session");
+        SessionManager.Session s = id != null ? sessions.get(id) : null;
+        if (s == null && !control) {
+            // client tanpa id (mis. bookmark lama): tempel ke sesi pertama
+            s = sessions.first();
+        }
+        if (s == null && !control) {
+            try {
+                s = sessions.create("shell 1");
+            } catch (IOException ignored) {
+            }
+        }
+        return s;
     }
 
     private void wsLoop(InputStream input, Client client) throws IOException {
         ByteArrayOutputStream fragments = null;
         int fragmentOpcode = 0;
 
-        while (running.get()) {
+        while (running.get() && !client.dead) {
             int b0 = input.read();
             if (b0 < 0) return;
             boolean fin = (b0 & 0x80) != 0;
@@ -442,13 +456,13 @@ public class WebTerminalServer {
 
             switch (opcode) {
                 case OP_CONTINUATION:
-                    if (fragments == null) break;  // frame lanjutan tanpa awal -> abaikan
+                    if (fragments == null) break;
                     fragments.write(payload, 0, payload.length);
                     if (fin) {
                         byte[] full = fragments.toByteArray();
                         fragments = null;
-                        if (client.control) handleControl(full);
-                        else deliver(fragmentOpcode, full, client);
+                        if (client.control) handleControl(full, client);
+                        else deliver(full, client);
                     }
                     break;
                 case OP_TEXT:
@@ -458,9 +472,9 @@ public class WebTerminalServer {
                         fragments.write(payload, 0, payload.length);
                         fragmentOpcode = opcode;
                     } else if (client.control) {
-                        handleControl(payload);
+                        handleControl(payload, client);
                     } else {
-                        deliver(opcode, payload, client);
+                        deliver(payload, client);
                     }
                     break;
                 case OP_CLOSE:
@@ -473,57 +487,40 @@ public class WebTerminalServer {
                         writeFrame(client.out, OP_PONG, payload, payload.length);
                     }
                     break;
+                case OP_PONG:
+                    client.lastPong = System.currentTimeMillis();
+                    break;
                 default:
                     break;
             }
         }
     }
 
-    private void deliver(int opcode, byte[] payload, Client client) {
-        writeToPty(payload, client);
+    private void deliver(byte[] payload, Client client) {
+        SessionManager.Session s = client.session;
+        if (s == null || client.control) return;
+        sessions.write(s, payload);
     }
 
     // ---------- kanal kontrol (/ctl) ----------
 
-    /** Pesan kontrol berbentuk JSON: {"type":"resize","rows":N,"cols":M}. */
-    private void handleControl(byte[] payload) {
+    private void handleControl(byte[] payload, Client client) {
         String msg = new String(payload, StandardCharsets.UTF_8);
+        SessionManager.Session s = client.session;
+        if (s == null) return;
+        if (msg.contains("\"ping\"")) {
+            client.sendText(CONTROL_PONG);
+            return;
+        }
         if (!msg.contains("resize")) return;
         int rows = jsonInt(msg, "rows");
         int cols = jsonInt(msg, "cols");
         if (rows <= 0 || cols <= 0) return;
-        PtyHelper p = pty;
-        if (p != null) p.resize(rows, cols);
+        sessions.resize(s, rows, cols);
     }
 
-    private void sendControl(Client c, String json) {
-        byte[] data = bytes(json);
-        synchronized (c.writeLock) {
-            try {
-                writeFrame(c.out, OP_TEXT, data, data.length);
-            } catch (IOException ignored) {
-            }
-        }
-    }
-
-    /** Minta semua client kontrol mengirim ulang ukuran terminalnya. */
-    private void broadcastControl(String json) {
-        byte[] data = bytes(json);
-        for (Client c : clients.values()) {
-            if (!c.control) continue;
-            synchronized (c.writeLock) {
-                try {
-                    writeFrame(c.out, OP_TEXT, data, data.length);
-                } catch (IOException ex) {
-                    clients.remove(c.socket);
-                    closeQuietly(c);
-                }
-            }
-        }
-    }
-
-    /** Parser JSON super-minimal: cukup untuk {"rows":24,"cols":80}. */
     private static int jsonInt(String json, String key) {
+        if (json == null) return -1;
         int at = json.indexOf("\"" + key + "\"");
         if (at < 0) return -1;
         int colon = json.indexOf(':', at);
@@ -540,30 +537,10 @@ public class WebTerminalServer {
         }
     }
 
-    private void writeToPty(byte[] payload, Client client) {
-        PtyHelper p = pty;
-        if (p == null || !p.isAlive()) {
-            // jangan diam saja: beri tahu client yang sedang mengetik kalau
-            // shell-nya belum hidup (kalau tidak, tombol terasa "mati").
-            byte[] msg = bytes("\r\n[sesi shell belum jalan, menunggu restart...]\r\n");
-            synchronized (client.writeLock) {
-                try {
-                    writeFrame(client.out, OP_BINARY, msg, msg.length);
-                } catch (IOException ignored) {
-                }
-            }
-            return;
-        }
-        try {
-            p.getInput().write(payload);
-            p.getInput().flush();
-        } catch (IOException ignored) {
-        }
-    }
+    // ---------- frame writer ----------
 
-    // ---------- frame writer (server -> client, unmasked) ----------
-
-    private void writeFrame(OutputStream output, int opcode, byte[] data, int len) throws IOException {
+    private void writeFrame(OutputStream output, int opcode, byte[] data, int len)
+            throws IOException {
         ByteArrayOutputStream header = new ByteArrayOutputStream();
         header.write(0x80 | opcode);
         if (len < 126) {
@@ -609,7 +586,6 @@ public class WebTerminalServer {
                 .append("Content-Length: ").append(bytes.length).append("\r\n")
                 .append("Cache-Control: no-cache\r\n");
         if (token != null && !token.isEmpty() && "text/html".equals(mime)) {
-            // supaya navigasi berikutnya tidak perlu menyalin ?token= di URL
             head.append("Set-Cookie: linuxbox_token=").append(token)
                     .append("; Path=/; HttpOnly; SameSite=Lax\r\n");
         }
@@ -631,7 +607,6 @@ public class WebTerminalServer {
 
     // ---------- autentikasi ----------
 
-    /** Token boleh di query string (?token=...) atau cookie linuxbox_token. */
     private boolean authorized(String target, Map<String, String> headers) {
         if (token == null || token.isEmpty()) return true;
         String fromQuery = queryParam(target, "token");
@@ -648,7 +623,6 @@ public class WebTerminalServer {
         return false;
     }
 
-    /** Bandingkan dengan waktu konstan (menghindari timing attack sederhana). */
     private boolean tokenMatches(String candidate) {
         return MessageDigest.isEqual(token.getBytes(StandardCharsets.UTF_8),
                 candidate.getBytes(StandardCharsets.UTF_8));
@@ -689,59 +663,47 @@ public class WebTerminalServer {
         try { c.socket.close(); } catch (IOException ignored) {}
     }
 
-    /** Ring buffer sederhana untuk scrollback terminal. */
-    private static final class Scrollback {
-        private final byte[] buf;
-        private int start;   // index byte tertua
-        private int size;    // jumlah byte terpakai
-
-        Scrollback(int capacity) {
-            buf = new byte[capacity];
-        }
-
-        synchronized void add(byte[] data, int len) {
-            if (len <= 0) return;
-            if (len >= buf.length) {
-                System.arraycopy(data, len - buf.length, buf, 0, buf.length);
-                start = 0;
-                size = buf.length;
-                return;
-            }
-            int end = (start + size) % buf.length;
-            int firstPart = Math.min(len, buf.length - end);
-            System.arraycopy(data, 0, buf, end, firstPart);
-            if (len > firstPart) {
-                System.arraycopy(data, firstPart, buf, 0, len - firstPart);
-            }
-            size += len;
-            if (size > buf.length) {
-                start = (start + (size - buf.length)) % buf.length;
-                size = buf.length;
-            }
-        }
-
-        synchronized byte[] snapshot() {
-            byte[] out = new byte[size];
-            int firstPart = Math.min(size, buf.length - start);
-            System.arraycopy(buf, start, out, 0, firstPart);
-            if (size > firstPart) {
-                System.arraycopy(buf, 0, out, firstPart, size - firstPart);
-            }
-            return out;
-        }
-    }
-
     /** Satu koneksi websocket; writeLock menjaga agar frame tidak tumpang tindih. */
-    private static final class Client {
+    private final class Client implements SessionManager.Sink {
         final Socket socket;
         final OutputStream out;
         final boolean control;
         final Object writeLock = new Object();
+        volatile SessionManager.Session session;
+        volatile boolean dead;
+        volatile long lastPong = System.currentTimeMillis();
 
         Client(Socket socket, OutputStream out, boolean control) {
             this.socket = socket;
             this.out = out;
             this.control = control;
+        }
+
+        @Override
+        public boolean isControl() {
+            return control;
+        }
+
+        @Override
+        public void sendBinary(byte[] data, int len) {
+            if (control) return;   // data PTY tidak pernah lewat kanal kontrol
+            write(OP_BINARY, data, len);
+        }
+
+        @Override
+        public void sendText(String text) {
+            byte[] data = bytes(text);
+            write(OP_TEXT, data, data.length);
+        }
+
+        private void write(int opcode, byte[] data, int len) {
+            synchronized (writeLock) {
+                try {
+                    writeFrame(out, opcode, data, len);
+                } catch (IOException e) {
+                    dead = true;
+                }
+            }
         }
     }
 }

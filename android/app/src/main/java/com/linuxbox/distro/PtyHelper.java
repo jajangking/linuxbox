@@ -44,6 +44,17 @@ public class PtyHelper {
     public static PtyHelper start(File filesDir, String nativeLibDir, File rootfs,
                                   java.util.List<String> command,
                                   java.util.Map<String, String> env) throws Exception {
+        return start(null, filesDir, nativeLibDir, rootfs, command, env);
+    }
+
+    /**
+     * @param id pengenal sesi; dipakai untuk nama socket kontrol supaya beberapa
+     *           sesi bisa jalan bersamaan (kalau semua memakai `ctrl.sock`,
+     *           helper sesi kedua gagal bind dengan EADDRINUSE).
+     */
+    public static PtyHelper start(String id, File filesDir, String nativeLibDir, File rootfs,
+                                  java.util.List<String> command,
+                                  java.util.Map<String, String> env) throws Exception {
         File helper = ProotSession.ptyBin(nativeLibDir);
         File proot = ProotSession.prootBin(nativeLibDir);
 
@@ -54,7 +65,10 @@ public class PtyHelper {
                     + " — jalankan 'Install distro' dulu");
         }
 
-        File ctrl = new File(filesDir, "ctrl.sock");
+        File ctrl = new File(filesDir,
+                (id == null || id.isEmpty()) ? "ctrl.sock" : "ctrl-" + id + ".sock");
+        // sisa socket dari proses yang mati mendadak bikin bind gagal (EADDRINUSE)
+        if (ctrl.exists()) ctrl.delete();
         java.util.Map<String, String> e = new java.util.HashMap<>(env);
         e.put(CTRL_ENV, ctrl.getAbsolutePath());
         // Diagnostik ptylauncher hanya aktif kalau ada penanda files/.debug,

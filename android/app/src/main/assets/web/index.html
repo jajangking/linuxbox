@@ -2,159 +2,479 @@
 <html lang="id">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0b0e14">
 <title>LinuxBox</title>
 <link rel="stylesheet" href="xterm.css">
 <style>
-  html, body { height: 100%; margin: 0; background: #0b0e14; }
-  #wrap { display: flex; flex-direction: column; height: 100%; }
-  #bar {
-    flex: 0 0 auto; font: 12px monospace; color: #8b98ad; background: #0b0e14;
-    padding: 4px 8px; border-bottom: 1px solid #1b2230; display: flex; gap: 10px;
+  :root {
+    --bg: #0b0e14; --bar: #11151f; --line: #1b2230; --fg: #c8c8c8;
+    --dim: #7c8798; --ok: #4ec9b0; --bad: #f07178; --accent: #61afef;
   }
-  #status.ok { color: #4ec9b0; }
-  #status.bad { color: #f07178; }
-  #term { flex: 1 1 auto; padding: 6px; min-height: 0; }
+  * { box-sizing: border-box; }
+  html, body {
+    height: 100%; margin: 0; background: var(--bg); color: var(--fg);
+    font: 13px/1.4 -apple-system, "Segoe UI", Roboto, sans-serif;
+    overscroll-behavior: none; -webkit-text-size-adjust: 100%;
+  }
+  #app { display: flex; flex-direction: column; height: 100%; }
+
+  /* ---- baris tab sesi ---- */
+  #tabs {
+    flex: 0 0 auto; display: flex; align-items: stretch; background: var(--bar);
+    border-bottom: 1px solid var(--line); overflow-x: auto; overflow-y: hidden;
+    scrollbar-width: none;
+  }
+  #tabs::-webkit-scrollbar { display: none; }
+  .tab {
+    flex: 0 0 auto; display: flex; align-items: center; gap: 6px;
+    padding: 8px 10px; border-right: 1px solid var(--line); cursor: pointer;
+    color: var(--dim); white-space: nowrap; user-select: none;
+  }
+  .tab.active { color: var(--fg); background: #161b27; box-shadow: inset 0 -2px 0 var(--accent); }
+  .tab .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--dim); }
+  .tab.alive .dot { background: var(--ok); }
+  .tab.dead .dot { background: var(--bad); }
+  .tab .close {
+    padding: 0 4px; border-radius: 3px; color: var(--dim); font-weight: bold;
+  }
+  .tab .close:hover { background: #2a3245; color: var(--fg); }
+  .tab.add { color: var(--accent); font-weight: bold; }
+
+  /* ---- baris aksi ---- */
+  #actions {
+    flex: 0 0 auto; display: flex; gap: 6px; padding: 6px 8px;
+    background: var(--bar); border-bottom: 1px solid var(--line); flex-wrap: wrap;
+  }
+  button.act {
+    background: #1b2230; color: var(--fg); border: 1px solid var(--line);
+    border-radius: 5px; padding: 5px 9px; font-size: 12px; cursor: pointer;
+  }
+  button.act:hover { border-color: var(--accent); }
+  button.act:active { transform: translateY(1px); }
+  #spacer { flex: 1 1 auto; }
+
+  /* ---- terminal ---- */
+  #term { flex: 1 1 auto; min-height: 0; padding: 6px; }
+  #overlay {
+    position: fixed; inset: 0; background: rgba(11, 14, 20, .82);
+    display: none; align-items: center; justify-content: center; flex-direction: column;
+    gap: 10px; z-index: 20; text-align: center; padding: 24px;
+  }
+  #overlay.show { display: flex; }
+  #overlay .big { font-size: 16px; color: var(--fg); }
+  #overlay .small { color: var(--dim); font-size: 12px; }
+  .spinner {
+    width: 22px; height: 22px; border: 2px solid var(--line);
+    border-top-color: var(--accent); border-radius: 50%;
+    animation: spin .8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ---- status + tombol sentuh ---- */
+  #status {
+    flex: 0 0 auto; display: flex; align-items: center; gap: 10px;
+    padding: 5px 10px; background: var(--bar); border-top: 1px solid var(--line);
+    font: 11px/1.6 monospace; color: var(--dim);
+    padding-bottom: calc(5px + env(safe-area-inset-bottom));
+  }
+  #state.ok { color: var(--ok); }
+  #state.bad { color: var(--bad); }
+  #state.wait { color: #e5c07b; }
+  #keys {
+    flex: 0 0 auto; display: flex; gap: 6px; padding: 6px 8px;
+    background: var(--bar); border-top: 1px solid var(--line); overflow-x: auto;
+  }
+  #keys button {
+    flex: 0 0 auto; min-width: 44px; height: 34px; background: #1b2230;
+    color: var(--fg); border: 1px solid var(--line); border-radius: 5px;
+    font: 12px monospace; cursor: pointer;
+  }
   #fatal {
-    display: none; color: #f07178; font: 13px/1.5 monospace;
+    display: none; color: var(--bad); font: 13px/1.6 monospace;
     padding: 16px; white-space: pre-wrap;
   }
+  @media (hover: hover) and (pointer: fine) { #keys { display: none; } }
 </style>
 </head>
 <body>
-<div id="wrap">
-  <div id="bar">
-    <span>LinuxBox</span>
-    <span id="status" class="bad">menyambung...</span>
+<div id="app">
+  <div id="tabs"></div>
+  <div id="actions">
+    <button class="act" id="btnNew">+ Sesi</button>
+    <button class="act" id="btnClear">Bersihkan</button>
+    <button class="act" id="btnFontOut">A−</button>
+    <button class="act" id="btnFontIn">A+</button>
+    <button class="act" id="btnReconnect">Sambung ulang</button>
+    <span id="spacer"></span>
+    <button class="act" id="btnHelp">?</button>
   </div>
   <div id="term"></div>
-  <pre id="fatal"></pre>
+  <div id="keys">
+    <button data-key="esc">esc</button>
+    <button data-key="tab">tab</button>
+    <button data-key="ctrlc">^C</button>
+    <button data-key="ctrld">^D</button>
+    <button data-key="ctrlz">^Z</button>
+    <button data-key="up">↑</button>
+    <button data-key="down">↓</button>
+    <button data-key="left">←</button>
+    <button data-key="right">→</button>
+    <button data-key="slash">/</button>
+    <button data-key="pipe">|</button>
+  </div>
+  <div id="status">
+    <span id="state" class="wait">menyambung…</span>
+    <span id="info"></span>
+  </div>
 </div>
+<div id="overlay"><div class="spinner"></div><div class="big" id="ovText">Menyambung…</div><div class="small" id="ovHint"></div></div>
+<pre id="fatal"></pre>
+
 <script src="xterm.js"></script>
 <script src="fit.js"></script>
 <script>
 (function () {
+  'use strict';
+
   var fatal = document.getElementById('fatal');
-  var statusEl = document.getElementById('status');
+  var termEl = document.getElementById('term');
+  var tabsEl = document.getElementById('tabs');
+  var stateEl = document.getElementById('state');
+  var infoEl = document.getElementById('info');
+  var overlay = document.getElementById('overlay');
+  var ovText = document.getElementById('ovText');
+  var ovHint = document.getElementById('ovHint');
 
   function die(msg) {
-    // Jangan biarkan layar hitam kosong: aset xterm.js yang hilang (build Gradle
-    // bersih) dulu tidak terlihat sama sekali — sekarang keluar pesannya.
     fatal.style.display = 'block';
     fatal.textContent = msg;
-    statusEl.textContent = 'error';
-    statusEl.className = 'bad';
+    setState('error', 'bad');
   }
 
   if (typeof Terminal === 'undefined') {
-    die('xterm.js tidak termuat.\n\n' +
-        'Asset web (xterm.js, xterm.css, fit.js) belum ada di APK.\n' +
-        'Jalankan:  scripts/fetch-assets.sh   (atau build ulang — tugas Gradle\n' +
+    die('xterm.js tidak termuat.\n\nAsset web (xterm.js, xterm.css, fit.js) belum ada di APK.\n' +
+        'Jalankan: scripts/fetch-assets.sh (atau build ulang — tugas Gradle\n' +
         'downloadWebAssets akan mengunduhnya otomatis), lalu build ulang APK.');
     return;
   }
 
+  // ---------------------------------------------------------------- state
+  var sessionId = null;       // sesi yang sedang dibuka di tab ini
+  var sessions = [];          // daftar sesi dari server
+  var ws = null, ctl = null;
+  var retries = 0;
+  var reconnectTimer = null;
+  var serverUp = true;
+  var fontSize = 14;
+
   var term = new Terminal({
-    cursorBlink: true,
-    fontFamily: 'monospace',
-    fontSize: 14,
-    theme: { background: '#0b0e14' }
+    cursorBlink: true, fontFamily: 'monospace', fontSize: fontSize,
+    theme: { background: '#0b0e14', foreground: '#c8c8c8' },
+    scrollback: 5000
   });
-  term.open(document.getElementById('term'));
+  term.open(termEl);
 
   var fit = null;
   if (typeof FitAddon !== 'undefined' && FitAddon.FitAddon) {
     fit = new FitAddon.FitAddon();
     term.loadAddon(fit);
   }
-  function doFit() { try { if (fit) fit.fit(); } catch (e) {} sendSize(); }
-  doFit();
-  window.addEventListener('resize', doFit);
-  term.onResize(function () { sendSize(); });
 
-  // token (?token=...) diteruskan ke /ws dan /ctl kalau server memakai auth
+  // ---------------------------------------------------------------- util
   function tokenQuery() {
     var m = /[?&]token=([^&]*)/.exec(location.search || '');
     return m ? '?token=' + encodeURIComponent(decodeURIComponent(m[1])) : '';
   }
+  function q(extra) {
+    var base = tokenQuery();
+    if (!extra) return base;
+    return base ? base + '&' + extra : '?' + extra;
+  }
+  function setState(text, cls) {
+    stateEl.textContent = text;
+    stateEl.className = cls || '';
+  }
+  function showOverlay(text, hint) {
+    ovText.textContent = text;
+    ovHint.textContent = hint || '';
+    overlay.classList.add('show');
+  }
+  function hideOverlay() { overlay.classList.remove('show'); }
+  function doFit() {
+    try { if (fit) fit.fit(); } catch (e) {}
+    sendSize();
+  }
 
-  var ws = null;
-  var ctl = null;
-  var retries = 0;
-  var closedByServer = false;
+  // ---------------------------------------------------------------- API
+  function api(path, opts) {
+    return fetch(path + q(), opts || {}).then(function (r) {
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.json();
+    });
+  }
 
-  // ---- kanal kontrol (/ctl): resize PTY, terpisah dari aliran data terminal ----
+  function refreshSessions() {
+    return api('/api/sessions').then(function (data) {
+      sessions = data.sessions || [];
+      var had = sessionId;
+      var exists = sessions.some(function (s) { return s.id === sessionId; });
+      if (!exists) sessionId = sessions.length ? sessions[0].id : null;
+      renderTabs();
+      infoEl.textContent = sessions.length + ' sesi · ' + fontSize + 'px';
+      // sesi aktif berubah (mis. sesi lama hilang setelah service restart)
+      if (sessionId !== had) {
+        term.reset();
+        connect();
+      }
+      return sessions;
+    }).catch(function () {
+      serverUp = false;
+      setState('server tidak merespons', 'bad');
+      scheduleReconnect();
+      return [];
+    });
+  }
+
+  function renderTabs() {
+    tabsEl.innerHTML = '';
+    sessions.forEach(function (s) {
+      var el = document.createElement('div');
+      el.className = 'tab' + (s.id === sessionId ? ' active ' : ' ') + (s.alive ? 'alive' : 'dead');
+      el.title = s.name + ' (klik 2x untuk ganti nama)';
+      var dot = document.createElement('span');
+      dot.className = 'dot';
+      var label = document.createElement('span');
+      label.textContent = s.name;
+      var close = document.createElement('span');
+      close.className = 'close';
+      close.textContent = '×';
+      close.title = 'Tutup sesi';
+      el.appendChild(dot); el.appendChild(label); el.appendChild(close);
+      el.addEventListener('click', function (e) {
+        if (e.target === close) { killSession(s.id); return; }
+        switchSession(s.id);
+      });
+      el.addEventListener('dblclick', function () { renameSession(s); });
+      tabsEl.appendChild(el);
+    });
+    var add = document.createElement('div');
+    add.className = 'tab add';
+    add.textContent = '+ sesi baru';
+    add.addEventListener('click', newSession);
+    tabsEl.appendChild(add);
+  }
+
+  function newSession() {
+    api('/api/sessions', { method: 'POST' }).then(function (data) {
+      if (data.error) { setState(data.error, 'bad'); return; }
+      return refreshSessions().then(function () { switchSession(data.id); });
+    }).catch(function (e) { setState('gagal buat sesi: ' + e.message, 'bad'); });
+  }
+
+  function killSession(id) {
+    api('/api/sessions/' + id + '/kill', { method: 'POST' }).then(function () {
+      if (id === sessionId) { term.reset(); sessionId = null; }
+      refreshSessions().then(function () {
+        if (!sessionId && sessions.length) switchSession(sessions[0].id);
+        else if (!sessions.length) newSession();
+      });
+    }).catch(function (e) { setState('gagal tutup sesi: ' + e.message, 'bad'); });
+  }
+
+  function renameSession(s) {
+    var name = prompt('Nama sesi', s.name);
+    if (name === null || !name.trim()) return;
+    api('/api/sessions/' + s.id + '/rename?name=' + encodeURIComponent(name.trim()),
+        { method: 'POST' }).then(refreshSessions);
+  }
+
+  function switchSession(id) {
+    if (id === sessionId) return;
+    closeSockets();
+    sessionId = id;
+    term.reset();
+    renderTabs();
+    connect();
+  }
+
+  // ---------------------------------------------------------------- socket
+  function wsUrl(path, extra) {
+    var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    var tail = extra ? (q(extra)) : q();
+    return proto + '//' + location.host + path + tail;
+  }
+
+  var KEYMAP = {
+    esc: '\x1b', tab: '\t', ctrlc: '\x03', ctrld: '\x04', ctrlz: '\x1a',
+    up: '\x1b[A', down: '\x1b[B', left: '\x1b[D', right: '\x1b[C',
+    slash: '/', pipe: '|'
+  };
+
   function sendSize() {
     if (!ctl || ctl.readyState !== WebSocket.OPEN) return;
     ctl.send(JSON.stringify({ type: 'resize', rows: term.rows, cols: term.cols }));
   }
 
-  function connectCtl() {
-    var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    ctl = new WebSocket(proto + '//' + location.host + '/ctl' + tokenQuery());
-    ctl.onopen = function () { sendSize(); };
-    ctl.onmessage = function (e) {
-      // server minta ukuran ulang (mis. setelah sesi shell di-restart)
-      if (e.data && String(e.data).indexOf('need-size') >= 0) sendSize();
-    };
-    ctl.onclose = function () { setTimeout(connectCtl, 3000); };
-    ctl.onerror = function () {};
+  function closeSockets() {
+    // tandai dulu: onclose berjalan ASINKRON, jadi flag global tidak cukup
+    if (ws) { ws.__byUser = true; try { ws.close(); } catch (e) {} ws = null; }
+    if (ctl) { ctl.__byUser = true; try { ctl.close(); } catch (e) {} ctl = null; }
   }
 
-  function setStatus(text, ok) {
-    statusEl.textContent = text;
-    statusEl.className = ok ? 'ok' : 'bad';
+  function connectCtl() {
+    if (!sessionId) return;
+    if (ctl && (ctl.readyState === WebSocket.OPEN || ctl.readyState === WebSocket.CONNECTING)) return;
+    var sock = new WebSocket(wsUrl('/ctl', 'session=' + encodeURIComponent(sessionId)));
+    ctl = sock;
+    sock.onopen = function () { sendSize(); };
+    sock.onmessage = function (e) {
+      var s = String(e.data || '');
+      if (s.indexOf('need-size') >= 0) sendSize();
+    };
+    sock.onclose = function () {
+      if (sock === ctl) ctl = null;
+      if (sock.__byUser) return;
+      setTimeout(connectCtl, 3000);
+    };
+    sock.onerror = function () {};
   }
 
   function connect() {
-    var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    ws = new WebSocket(proto + '//' + location.host + '/ws' + tokenQuery());
-    // server mengirim frame BINARY (byte PTY mentah, belum tentu UTF-8 valid)
-    ws.binaryType = 'arraybuffer';
+    if (!sessionId || !serverUp) return;
+    if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
 
-    ws.onopen = function () {
+    var sock = new WebSocket(wsUrl('/ws', 'session=' + encodeURIComponent(sessionId)));
+    ws = sock;
+    sock.binaryType = 'arraybuffer';  // server mengirim frame BINARY (byte PTY mentah)
+
+    sock.onopen = function () {
       retries = 0;
-      closedByServer = false;
-      setStatus('terhubung', true);
+      serverUp = true;
+      hideOverlay();
+      setState('terhubung', 'ok');
       term.focus();
+      connectCtl();
+      refreshSessions();
     };
 
     ws.onmessage = function (e) {
-      if (typeof e.data === 'string') {
-        term.write(e.data);
-      } else {
-        term.write(new Uint8Array(e.data));
-      }
+      if (typeof e.data === 'string') term.write(e.data);
+      else term.write(new Uint8Array(e.data));
     };
 
-    ws.onclose = function () {
-      if (closedByServer) return;
-      setStatus('terputus', false);
-      if (retries >= 10) {
-        term.write('\r\n[web terminal terputus]\r\n');
-        return;
-      }
-      retries++;
-      var wait = Math.min(retries, 5) * 1000;
-      term.write('\r\n[sambungan putus, mencoba lagi ' + (wait / 1000) + 's...]\r\n');
-      setTimeout(function () {
-        // server memutar ulang scrollback setiap connect, jadi bersihkan layar
-        // dulu supaya isi terminal tidak dobel.
-        term.reset();
-        connect();
-      }, wait);
+    sock.onclose = function () {
+      if (sock === ws) ws = null;
+      if (sock.__byUser) return;   // kita yang menutupnya (ganti tab / tombol)
+      scheduleReconnect();
     };
 
-    ws.onerror = function () { setStatus('kesalahan web socket', false); };
+    sock.onerror = function () { setState('kesalahan koneksi', 'bad'); };
   }
 
+  function scheduleReconnect() {
+    if (reconnectTimer) return;
+    retries++;
+    var wait = Math.min(retries, 6) * 1000;
+    if (retries === 1) {
+      term.write('\r\n\x1b[33m[sambungan putus, menyambung ulang…]\x1b[0m\r\n');
+    }
+    setState('menyambung ulang (' + (wait / 1000) + 's)', 'wait');
+    showOverlay('Sambungan terputus', 'Menyambung ulang ke sesi ' + (sessionId || '…') + ' — ' +
+                'perintah yang sedang jalan di dalamnya tetap hidup.');
+    reconnectTimer = setTimeout(function () {
+      reconnectTimer = null;
+      if (!sessionId) { refreshSessions(); return; }
+      connect();
+      //Kalau setelah 8 detik belum terbuka, anggap gagal dan coba lagi.
+      setTimeout(function () {
+        if (!ws || ws.readyState !== WebSocket.OPEN) scheduleReconnect();
+      }, 8000);
+    }, wait);
+  }
+
+  // ---------------------------------------------------------------- watchdog
+  // Deteksi server mati/hidup lagi (mis. Android membunuh service lalu service
+  // menyala kembali) walau socket tidak mengirim apa pun.
+  function watchdog() {
+    api('/healthz').then(function (st) {
+      if (!serverUp) {
+        serverUp = true;
+        setState('server kembali', 'ok');
+        refreshSessions().then(function () { connect(); });
+      } else {
+        infoEl.textContent = (st.sessions || 0) + '/' + (st.sessionsAlive || 0) +
+            ' sesi hidup · ' + (st.distro || '?') + ' · ' + (st.shell || '?') + ' · ' + fontSize + 'px';
+        if (!ws || ws.readyState !== WebSocket.OPEN) connect();
+      }
+    }).catch(function () {
+      serverUp = false;
+      setState('server tidak merespons', 'bad');
+      showOverlay('Server tidak merespons', 'Android mungkin menghentikan LinuxBox. ' +
+                  'Buka aplikasinya lalu tekan Start — sesi akan dipulihkan.');
+      scheduleReconnect();
+    });
+  }
+
+  // ---------------------------------------------------------------- events
+  window.addEventListener('resize', doFit);
+  term.onResize(function () { sendSize(); });
   term.onData(function (d) {
     if (ws && ws.readyState === WebSocket.OPEN) ws.send(d);
   });
+  document.addEventListener('click', function (e) {
+    // jangan rebut fokus kalau user sedang menekan tab/tombol
+    if (e.target.closest('#tabs, #actions, #keys')) return;
+    term.focus();
+  });
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'visible') {
+      doFit();
+      if (!ws || ws.readyState !== WebSocket.OPEN) { retries = 0; connect(); }
+    }
+  });
 
-  document.addEventListener('click', function () { term.focus(); });
-  connect();
-  connectCtl();
+  document.getElementById('btnNew').addEventListener('click', newSession);
+  document.getElementById('btnClear').addEventListener('click', function () { term.clear(); });
+  document.getElementById('btnReconnect').addEventListener('click', function () {
+    closeSockets();
+    retries = 0;
+    serverUp = true;
+    refreshSessions().then(connect);
+  });
+  document.getElementById('btnFontIn').addEventListener('click', function () {
+    fontSize = Math.min(28, fontSize + 1); term.options.fontSize = fontSize; doFit();
+  });
+  document.getElementById('btnFontOut').addEventListener('click', function () {
+    fontSize = Math.max(8, fontSize - 1); term.options.fontSize = fontSize; doFit();
+  });
+  document.getElementById('btnHelp').addEventListener('click', function () {
+    alert('LinuxBox\n\n' +
+      '• Tab di atas = sesi terminal terpisah; proses di dalamnya tetap jalan\n' +
+      '  walau browser ditutup atau koneksi putus.\n' +
+      '• + Sesi untuk menambah, × pada tab untuk menutup, klik 2x untuk ganti nama.\n' +
+      '• Kalau shell keluar (exit/crash), sesi otomatis hidup lagi.\n' +
+      '• A+/A− mengubah ukuran huruf, Bersihkan mengosongkan layar saja.');
+  });
+  Array.prototype.forEach.call(document.querySelectorAll('#keys button'), function (b) {
+    b.addEventListener('click', function () {
+      var k = KEYMAP[b.getAttribute('data-key')];
+      if (k && ws && ws.readyState === WebSocket.OPEN) ws.send(k);
+      term.focus();
+    });
+  });
+
+  // ---------------------------------------------------------------- start
+  setState('menyambung…', 'wait');
+  showOverlay('Menyambung…', '');
+  refreshSessions().then(function () {
+    hideOverlay();
+    if (!sessionId && sessions.length) sessionId = sessions[0].id;
+    connect();
+  });
+  setInterval(watchdog, 15000);
+  setInterval(function () { if (ws && ws.readyState === WebSocket.OPEN) sendSize(); }, 20000);
+  doFit();
 })();
 </script>
 </body>
