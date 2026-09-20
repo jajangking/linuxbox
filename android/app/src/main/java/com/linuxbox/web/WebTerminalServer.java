@@ -283,8 +283,8 @@ public class WebTerminalServer {
             return;
         }
         if ("resize".equals(action)) {
-            sessions.resize(s, jsonInt(queryParam(target, "rows"), -1),
-                    jsonInt(queryParam(target, "cols"), -1));
+            sessions.resize(s, intParam(target, "rows", -1),
+                    intParam(target, "cols", -1));
             serveJson(output, "{\"ok\":true}");
             return;
         }
@@ -534,6 +534,16 @@ public class WebTerminalServer {
             return Integer.parseInt(json.substring(start, i));
         } catch (NumberFormatException e) {
             return -1;
+        }
+    }
+
+    private static int intParam(String target, String key, int def) {
+        String v = queryParam(target, key);
+        if (v == null || v.isEmpty()) return def;
+        try {
+            return Integer.parseInt(v.trim());
+        } catch (NumberFormatException e) {
+            return def;
         }
     }
 
