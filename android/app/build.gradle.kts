@@ -9,7 +9,15 @@ android {
     defaultConfig {
         applicationId = "com.linuxbox"
         minSdk = 26
-        targetSdk = 33
+        // PENTING: jangan naikkan ke >= 29 kalau rootfs masih di filesDir.
+        // Sejak Android 10, app dengan targetSdk >= 29 (domain SELinux
+        // untrusted_app_29/_30/_32/_33) DILARANG execve() berkas berlabel
+        // app_data_file — yaitu seluruh isi filesDir, termasuk bin/busybox dan
+        // ld-musl di dalam rootfs. Hasilnya: proot jalan (dia di
+        // nativeLibraryDir / apk_data_file_t) tapi execve("/bin/sh") gagal.
+        // Termux mematok 28 persis karena alasan ini. Naikkan lagi hanya
+        // setelah rootfs bisa dieksekusi dari luar filesDir.
+        targetSdk = 28
         versionCode = 1
         versionName = "0.1.0"
         ndk { abiFilters += listOf("arm64-v8a") }

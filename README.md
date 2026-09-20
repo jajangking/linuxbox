@@ -61,6 +61,31 @@ cd scripts && ./fetch-assets.sh        # jalankan di Termux (isilkan assets)
 > akan menawarkan regenerate wrapper saat dibuka ("Gradle wrapper missing").
 > Butuh NDK + CMake (Studio akan minta install saat pertama build).
 
+### Kenapa `targetSdk` dipatok 28
+
+Sejak Android 10, app dengan **targetSdk ≥ 29** (domain SELinux
+`untrusted_app_29/_30/_32/_33`) dilarang `execve()` berkas berlabel
+`app_data_file`, yaitu **seluruh isi `filesDir`** — termasuk `bin/busybox` dan
+`ld-musl-aarch64.so.1` di dalam rootfs. Gejalanya: `proot` sendiri mau jalan
+(karena dia diekstrak ke `nativeLibraryDir` berlabel `apk_data_file_t`), tapi
+setiap perintah guest gagal `execve("/bin/sh")` dengan EACCES/ENOENT.
+
+Termux mematok `targetSdkVersion 28` persis karena alasan ini — lihat
+[Termux and Android 10](https://gitlab.com/termux-mirror/termux-dev-wiki/-/blob/master/Termux-and-Android-10.md).
+Karena itu `build.gradle.kts` dan `AndroidManifest.xml` di sini sama-sama
+memakai **28**. Kalau dinaikkan, distro yang rootfs-nya di `filesDir` berhenti
+bekerja.
+
+> Domain SELinux ditentukan **saat instalasi** berdasar targetSdk. Setelah
+> menurunkan nilai ini: **uninstall dulu, reboot, lalu install ulang**. Verifikasi:
+>
+> ```bash
+> adb shell run-as com.linuxbox sh -c 'cat /proc/self/attr/current'
+> # harus: u:r:untrusted_app_27:s0:...  atau  ..._28:...  (BUKAN ..._33)
+> adb shell "run-as com.linuxbox cp /system/bin/toybox files/tb; run-as com.linuxbox chmod 755 files/tb"
+> adb shell "run-as com.linuxbox sh -c './files/tb echo WX-OK'"   # harus cetak WX-OK
+> ```
+
 ### Kenapa binary native harus di `lib/<abi>/` (jniLibs), bukan `filesDir`
 
 Sejak targetSdk 30, domain SELinux `untrusted_app_30/_32` **tidak boleh
