@@ -13,7 +13,7 @@
       "label": "Ubuntu 24.04 LTS (base)",
       "url": "https://cdimage.ubuntu.com/ubuntu-base/releases/24.04/release/ubuntu-base-24.04.5-base-arm64.tar.gz",
       "sha256": "a91d5a93010193712d346d761372b7c9db6dfcf093893161c64ca107f05914f2",
-      "sizeBytes": 30408704
+      "sizeBytes": 29936675
     },
     {
       "id": "ubuntu-2604",

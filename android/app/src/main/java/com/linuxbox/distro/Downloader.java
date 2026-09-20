@@ -172,7 +172,9 @@ public final class Downloader {
                     if (log != null) {
                         if (showTotal > 0) {
                             int pct = (int) Math.min(100, done * 100 / showTotal);
-                            if (pct / 5 != lastPct / 5) {
+                            // tiap 10% saja: 20 baris progress per pemasangan
+                            // cuma membanjiri log aktivitas
+                            if (pct / 10 != lastPct / 10) {
                                 lastPct = pct;
                                 log.log("  " + pct + "% (" + human(done) + " / " + human(showTotal) + ")");
                             }
@@ -186,7 +188,8 @@ public final class Downloader {
 
             long size = part.length();
             if (total > 0 && size != total) {
-                throw new IOException("unduhan tidak lengkap: " + size + " dari " + total + " byte");
+                throw new IOException("koneksi berhenti pada " + human(size) + " dari "
+                        + human(total) + " — sisa akan dilanjutkan dari .part");
             }
 
             if (verify) {
