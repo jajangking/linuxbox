@@ -50,43 +50,85 @@ public final class DistroCatalog {
         }
     }
 
-    /** Fallback kalau assets/distros.json tidak ada. */
+    /**
+     * Fallback kalau assets/distros.json tidak ada — DAN sumber hash cadangan
+     * kalau aset di APK ternyata usang. Pernah kejadian: kode Java sudah baru
+     * tapi asetnya belum ikut ter-refresh, jadi unduhan jalan tanpa verifikasi
+     * sha256. Karena itu BUILTIN juga memuat hash asli upstream.
+     */
     private static final Distro[] BUILTIN = {
-            new Distro("alpine", "Alpine 3.24 (minirootfs, ringan)",
+            new Distro("alpine", "Alpine 3.24.2 (minirootfs, ringan)",
                     // url kosong -> pakai rootfs.tar.gz yang dibundel di assets (offline aman)
                     "",
-                    "", 4L * 1024 * 1024),
+                    "9bf70a7f18ea44094cbb5f70c58f9af129c8214745743db0e68e5502cc2ce773",
+                    4L * 1024 * 1024),
             new Distro("ubuntu-2404", "Ubuntu 24.04 LTS (base)",
                     "https://cdimage.ubuntu.com/ubuntu-base/releases/24.04/release/ubuntu-base-24.04.5-base-arm64.tar.gz",
-                    "", 29L * 1024 * 1024),
+                    "a91d5a93010193712d346d761372b7c9db6dfcf093893161c64ca107f05914f2",
+                    29_936_675L),
             new Distro("ubuntu-2604", "Ubuntu 26.04.1 LTS (base)",
                     "https://cdimage.ubuntu.com/ubuntu-base/releases/26.04/release/ubuntu-base-26.04.1-base-arm64.tar.gz",
-                    "", 33L * 1024 * 1024),
+                    "5a1906794ced63a71a8119c3f211ef5f0bbe0a243001b4bbd41fdf80c5b219fd",
+                    33L * 1024 * 1024),
     };
+
+    /** Dari mana katalog terakhir dibaca — supaya bisa ditulis ke log. */
+    private static volatile String lastSource = "bawaan Java";
 
     private DistroCatalog() {}
 
     public static List<Distro> load(Context ctx) {
-        List<Distro> out = new ArrayList<>();
+        // Mulai dari bawaan, lalu timpa dengan isi aset. Kalau entri aset
+        // kosong (aset usang), nilai bawaan tetap dipakai — jadi sha256 tidak
+        // pernah hilang cuma karena berkas aset belum ikut terbarukan.
+        java.util.LinkedHashMap<String, Distro> map = new java.util.LinkedHashMap<>();
+        for (Distro d : BUILTIN) map.put(d.id, d);
+
         try {
-            String json = readAsset(ctx, ASSET);
-            JSONObject root = new JSONObject(json);
+            JSONObject root = new JSONObject(readAsset(ctx, ASSET));
             JSONArray arr = root.getJSONArray("distros");
             for (int i = 0; i < arr.length(); i++) {
                 JSONObject o = arr.getJSONObject(i);
                 String id = o.optString("id", "");
+                if (id.isEmpty()) continue;
+                Distro b = map.get(id);
                 String url = o.optString("url", "");
-                if (id.isEmpty() || url.isEmpty()) continue;
-                out.add(new Distro(id, o.optString("label", id), url,
-                        o.optString("sha256", ""), o.optLong("sizeBytes", 0)));
+                if (url.isEmpty() && b != null) url = b.url;
+                if (url.isEmpty()) continue;   // tanpa URL & tanpa bawaan: abaikan
+
+                String sha = o.optString("sha256", "");
+                if (sha.isEmpty() && b != null) sha = b.sha256;
+                long size = o.optLong("sizeBytes", 0);
+                if (size <= 0 && b != null) size = b.sizeBytes;
+
+                map.put(id, new Distro(id, o.optString("label", b != null ? b.label : id),
+                        url, sha, size));
             }
+            lastSource = ASSET;
         } catch (Exception ignored) {
-            // asset tidak ada / JSON rusak -> pakai bawaan
+            lastSource = "bawaan Java (assets/" + ASSET + " tidak terbaca)";
         }
-        if (out.isEmpty()) {
-            for (Distro d : BUILTIN) out.add(d);
+        return new ArrayList<>(map.values());
+    }
+
+    /**
+     * Ringkasan katalog untuk log: sumber berkas, berapa entri yang punya
+     * sha256, dan id mana yang tidak punya. Dipakai untuk mendiagnosis
+     * "kok verifikasi hash tidak jalan".
+     */
+    public static String describe(Context ctx) {
+        List<Distro> all = load(ctx);
+        int withSha = 0;
+        StringBuilder tanpa = new StringBuilder();
+        for (Distro d : all) {
+            if (d.sha256 != null && !d.sha256.trim().isEmpty()) {
+                withSha++;
+            } else {
+                tanpa.append(' ').append(d.id);
+            }
         }
-        return out;
+        return all.size() + " entri dari " + lastSource + ", sha256 " + withSha + "/" + all.size()
+                + (tanpa.length() > 0 ? " (tanpa hash:" + tanpa + ")" : "");
     }
 
     public static String defaultId(Context ctx) {

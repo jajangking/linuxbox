@@ -211,6 +211,15 @@ unzip -p termux-app.apk lib/arm64-v8a/libbusybox.so \
 - Arsip lama di `files/rootfs-<id>.tar.gz` dicek hash-nya sebelum dipakai:
   kalau tidak cocok, dihapus dan diunduh ulang — rootfs yang setengah rusak
   tidak pernah sampai ke tahap ekstraksi.
+- **Hash juga ada di `DistroCatalog.BUILTIN`** (daftar cadangan di Java).
+  `load()` menggabungkan aset + bawaan per id: entri aset yang `sha256`-nya
+  kosong mewarisi hash bawaan. Jadi kalau `assets/distros.json` di APK belum
+  ikut ter-refresh saat build, verifikasi tetap jalan (URL & ukuran tetap dari
+  aset).
+- Saat memasang distro, log mencetak `Katalog distro: 3 entri dari
+  distros.json, sha256 3/3` (atau `… dari bawaan Java (assets/distros.json
+  tidak terbaca) …`). Kalau baris itu menunjukkan `sha256 0/3`, unduhan tidak
+  akan diverifikasi — itu tanda aset di APK usang.
 
 ### Backup terenkripsi (passphrase)
 

@@ -46,6 +46,14 @@ public class Bootstrap {
     /** Pasang (atau ganti) distro tertentu. */
     public void install(DistroCatalog.Distro d) throws Exception {
         if (d == null) throw new IOException("distro tidak dipilih");
+        // Tulis sumber katalog & kelengkapan hash: kalau baris ini bilang
+        // "sha256 0/3", berarti aset distros.json di APK belum terbarukan dan
+        // unduhan tidak akan diverifikasi.
+        log.log("Katalog distro: " + DistroCatalog.describe(ctx));
+        if (d.sha256 == null || d.sha256.trim().isEmpty()) {
+            log.log("  PERINGATAN: tidak ada sha256 untuk " + d.id
+                    + " — isi unduhan TIDAK diverifikasi");
+        }
         bootstrapBinaries();
         File filesDir = ctx.getFilesDir();
         File rootfs = ProotSession.rootfsDir(filesDir, d.id);
