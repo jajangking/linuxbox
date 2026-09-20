@@ -436,7 +436,6 @@
       serverUp = true;
       hideOverlay();
       setState('terhubung', 'ok');
-      term.focus();
       connectCtl();
       refreshSessions();
     };
@@ -552,6 +551,13 @@
       var t = e.touches[0];
       var dy = t.clientY - gsY;
       if (!gsMoved && Math.abs(dy) < 8) return;
+      if (!gsMoved) {
+        gsMoved = true;
+        // mulai geser: tutup keyboard. textarea xterm yang ter-fokus membuat
+        // Android memunculkan soft keyboard melulu — blur biar scroll bersih.
+        var ae = document.activeElement;
+        if (ae && ae.blur && ae !== document.body) ae.blur();
+      }
       gsMoved = true;
       e.preventDefault();
       cellDims();
@@ -645,7 +651,7 @@
     b.addEventListener('click', function () {
       var k = KEYMAP[b.getAttribute('data-key')];
       if (k && ws && ws.readyState === WebSocket.OPEN) ws.send(k);
-      term.focus();
+      // jangan refokus textarea: itu hanya membuat soft keyboard muncul lagi.
     });
   });
 
