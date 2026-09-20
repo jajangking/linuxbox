@@ -14,6 +14,7 @@ Yang dicek:
   4. WS    replay     -> scrollback langsung diterima begitu connect (prompt tampil)
   5. WS    echo       -> command yang diketik menghasilkan output
   6. WS    binary     -> byte non-UTF-8 tidak memutuskan koneksi
+  7. WS    /ctl       -> resize PTY (TIOCSWINSZ) lewat kanal kontrol
 """
 import base64
 import os
@@ -45,12 +46,12 @@ def http_get(host, port, path):
 
 
 class Ws:
-    def __init__(self, host, port):
+    def __init__(self, host, port, path="/ws"):
         self.sock = socket.create_connection((host, port), timeout=TIMEOUT)
         key = base64.b64encode(os.urandom(16)).decode()
         self.sock.sendall((
-            "GET /ws HTTP/1.1\r\nHost: %s:%d\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
-            "Sec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\n\r\n" % (host, port, key)
+            "GET %s HTTP/1.1\r\nHost: %s:%d\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+            "Sec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\n\r\n" % (path, host, port, key)
         ).encode())
         buf = b""
         while b"\r\n\r\n" not in buf:
@@ -168,6 +169,20 @@ def main():
           + (" (frame text + byte non-UTF-8 = browser putus koneksi)" if 0x1 in ops else ""))
     check("byte non-UTF-8 tidak memutus koneksi", alive and b"\xff" in raw,
           "koneksi tetap hidup" if alive else "KONEKSI DIPUTUS (frame text?)")
+
+    # kanal kontrol /ctl: ukuran PTY mengikuti window
+    ctl = Ws(host, port, path="/ctl")
+    first = b"".join(p for _, p in ctl.frames(2.0)[0]).decode("utf-8", "replace")
+    check("handshake /ctl + pesan need-size", "101" in ctl.status and "need-size" in first,
+          ctl.status + " " + first[:60])
+    rows, cols = 45, 132
+    ctl.send(('{"type":"resize","rows":%d,"cols":%d}' % (rows, cols)).encode())
+    time.sleep(0.4)
+    ws.send(b"stty size\n")
+    text = b"".join(p for _, p in ws.frames(2.5)[0]).decode("utf-8", "replace")
+    check("resize PTY diterapkan (TIOCSWINSZ)", ("%d %d" % (rows, cols)) in text,
+          "" if ("%d %d" % (rows, cols)) in text else "stty size -> %r" % text[-80:])
+    ctl.close()
 
     ws.close()
     print()

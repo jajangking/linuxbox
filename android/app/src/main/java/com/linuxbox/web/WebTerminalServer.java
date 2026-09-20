@@ -48,6 +48,11 @@ public class WebTerminalServer {
     private static final int OP_PING = 0x9;
     private static final int OP_PONG = 0xA;
 
+    /** Endpoint websocket kontrol (JSON): resize PTY, dsb. Terpisah dari /ws
+     *  supaya perintah kontrol tidak pernah tercampur dengan ketikan user. */
+    private static final String CONTROL_PATH = "/ctl";
+    private static final String CONTROL_NEED_SIZE = "{\"type\":\"need-size\"}";
+
     private static final int SCROLLBACK_MAX = 256 * 1024;
     private static final long RESTART_MIN_DELAY_MS = 1500L;
     private static final long RESTART_MAX_DELAY_MS = 15000L;
@@ -110,6 +115,7 @@ public class WebTerminalServer {
                 .append(",\"port\":").append(getBoundPort())
                 .append(",\"sessionAlive\":").append(p != null && p.isAlive())
                 .append(",\"clients\":").append(clients.size())
+                .append(",\"resize\":").append(p != null && p.hasControl())
                 .append(",\"shell\":\"").append(ProotSession.detectShell(ctx.getFilesDir())).append('"');
         String err = lastError;
         if (err != null) {
@@ -144,6 +150,7 @@ public class WebTerminalServer {
                     delay = RESTART_MIN_DELAY_MS;
                     broadcast(bytes("\r\n[sesi shell baru dimulai: "
                             + ProotSession.detectShell(ctx.getFilesDir()) + "]\r\n"));
+                    broadcastControl(CONTROL_NEED_SIZE);
                 } catch (Exception e) {
                     lastError = String.valueOf(e.getMessage());
                     synchronized (sessionLock) {
@@ -205,6 +212,7 @@ public class WebTerminalServer {
 
     private void broadcast(byte[] data, int len) {
         for (Client c : clients.values()) {
+            if (c.control) continue;  // /ctl hanya untuk pesan kontrol, bukan output PTY
             synchronized (c.writeLock) {
                 try {
                     // BINARY frame: byte PTY mentah boleh apa saja, tidak wajib UTF-8.
@@ -257,7 +265,7 @@ public class WebTerminalServer {
             } else if (!method.equals("GET")) {
                 httpError(output, 405);
             } else if ("websocket".equalsIgnoreCase(headers.get("upgrade"))) {
-                client = doWebSocket(sock, input, output, headers);
+                client = doWebSocket(sock, input, output, headers, CONTROL_PATH.equals(path));
                 if (client != null) wsLoop(input, client);
             } else if (path.equals("/ws")) {
                 httpError(output, 400, "websocket upgrade expected");
@@ -316,7 +324,7 @@ public class WebTerminalServer {
     // ---------- web socket ----------
 
     private Client doWebSocket(Socket sock, InputStream input, OutputStream output,
-                               Map<String, String> headers) throws IOException {
+                               Map<String, String> headers, boolean control) throws IOException {
         String key = headers.get("sec-websocket-key");
         if (key == null) {
             httpError(output, 400, "missing Sec-WebSocket-Key");
@@ -337,8 +345,14 @@ public class WebTerminalServer {
                 "Sec-WebSocket-Accept: " + accept + "\r\n\r\n").getBytes(StandardCharsets.UTF_8));
         output.flush();
 
-        Client client = new Client(sock, output);
+        Client client = new Client(sock, output, control);
         clients.put(sock, client);
+
+        if (control) {
+            // terminal baru connect: minta ukuran sebenarnya (bukan tebakan 80x24)
+            sendControl(client, CONTROL_NEED_SIZE);
+            return client;
+        }
 
         // putar ulang output terakhir supaya client yang connect belakangan
         // langsung melihat prompt/banner, bukan layar kosong.
@@ -392,7 +406,8 @@ public class WebTerminalServer {
                     if (fin) {
                         byte[] full = fragments.toByteArray();
                         fragments = null;
-                        deliver(fragmentOpcode, full, client);
+                        if (client.control) handleControl(full);
+                        else deliver(fragmentOpcode, full, client);
                     }
                     break;
                 case OP_TEXT:
@@ -401,6 +416,8 @@ public class WebTerminalServer {
                         fragments = new ByteArrayOutputStream();
                         fragments.write(payload, 0, payload.length);
                         fragmentOpcode = opcode;
+                    } else if (client.control) {
+                        handleControl(payload);
                     } else {
                         deliver(opcode, payload, client);
                     }
@@ -423,6 +440,63 @@ public class WebTerminalServer {
 
     private void deliver(int opcode, byte[] payload, Client client) {
         writeToPty(payload, client);
+    }
+
+    // ---------- kanal kontrol (/ctl) ----------
+
+    /** Pesan kontrol berbentuk JSON: {"type":"resize","rows":N,"cols":M}. */
+    private void handleControl(byte[] payload) {
+        String msg = new String(payload, StandardCharsets.UTF_8);
+        if (!msg.contains("resize")) return;
+        int rows = jsonInt(msg, "rows");
+        int cols = jsonInt(msg, "cols");
+        if (rows <= 0 || cols <= 0) return;
+        PtyHelper p = pty;
+        if (p != null) p.resize(rows, cols);
+    }
+
+    private void sendControl(Client c, String json) {
+        byte[] data = bytes(json);
+        synchronized (c.writeLock) {
+            try {
+                writeFrame(c.out, OP_TEXT, data, data.length);
+            } catch (IOException ignored) {
+            }
+        }
+    }
+
+    /** Minta semua client kontrol mengirim ulang ukuran terminalnya. */
+    private void broadcastControl(String json) {
+        byte[] data = bytes(json);
+        for (Client c : clients.values()) {
+            if (!c.control) continue;
+            synchronized (c.writeLock) {
+                try {
+                    writeFrame(c.out, OP_TEXT, data, data.length);
+                } catch (IOException ex) {
+                    clients.remove(c.socket);
+                    closeQuietly(c);
+                }
+            }
+        }
+    }
+
+    /** Parser JSON super-minimal: cukup untuk {"rows":24,"cols":80}. */
+    private static int jsonInt(String json, String key) {
+        int at = json.indexOf("\"" + key + "\"");
+        if (at < 0) return -1;
+        int colon = json.indexOf(':', at);
+        if (colon < 0) return -1;
+        int i = colon + 1;
+        while (i < json.length() && (json.charAt(i) == ' ' || json.charAt(i) == '"')) i++;
+        int start = i;
+        while (i < json.length() && Character.isDigit(json.charAt(i))) i++;
+        if (i == start) return -1;
+        try {
+            return Integer.parseInt(json.substring(start, i));
+        } catch (NumberFormatException e) {
+            return -1;
+        }
     }
 
     private void writeToPty(byte[] payload, Client client) {
@@ -571,11 +645,13 @@ public class WebTerminalServer {
     private static final class Client {
         final Socket socket;
         final OutputStream out;
+        final boolean control;
         final Object writeLock = new Object();
 
-        Client(Socket socket, OutputStream out) {
+        Client(Socket socket, OutputStream out, boolean control) {
             this.socket = socket;
             this.out = out;
+            this.control = control;
         }
     }
 }

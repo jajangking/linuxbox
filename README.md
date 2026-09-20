@@ -24,8 +24,13 @@ MainActivity ──install──> Bootstrap (unduh/extract rootfs + proot)
 - **ptylauncher.c**: helper NDK kecil — `openpty()+fork()`, pasang slave ke stdio
   guest, lalu relay `master <-> stdin/stdout` proses. Alasan: Java/Android tidak punya
   `forkpty`, jadi PTY dibuat di sisi C dan bytes dialirkan lewat pipe proses biasa.
+  Helper juga membuka kanal kontrol unix-datagram di `$LINUXBOX_CTRL_SOCK`
+  (`files/ctrl.sock`) untuk menerima perintah `TIOCSWINSZ` — Java tidak punya
+  `ioctl()`, jadi resize PTY dikerjakan di sini (kernel yang mengirim `SIGWINCH`).
 - **WebTerminalServer**: server HTTP + WebSocket minimal tanpa library (RFC6455 subset),
   melayani `index.html` + asset dari `assets/web/`, dan relay byte PTY ↔ client.
+  Ada dua endpoint websocket: `/ws` (aliran byte terminal, frame binary) dan
+  `/ctl` (pesan kontrol JSON, mis. resize).
 
 ## Persyaratan build
 
@@ -90,7 +95,15 @@ Penyebab yang sudah pernah terjadi (dan sudah diperbaiki di kode ini):
    crash, atau gagal exec), server tetap hidup tapi terminal selamanya bisu.
    Sekarang ada supervisor: sesi di-restart dengan backoff 1,5s → 15s dan
    statusnya dikirim ke client.
-5. **Aset `xterm.js` tidak ikut ter-bundle.** `assets/web/` di repo cuma berisi
+5. **Ukuran terminal tidak mengikuti window.** PTY dibuat dengan winsize bawaan
+   kernel (0x0) sehingga `stty size` nol dan tampilan berantakan. Sekarang
+   defaultnya 80x24, lalu klien mengirim `{"type":"resize","rows":N,"cols":M}`
+   ke `/ctl` setiap kali window/xterm berubah ukuran; kalau sesi shell
+   di-restart, server meminta ulang ukuran lewat `{"type":"need-size"}`. Bila
+   kanal kontrol (`files/ctrl.sock`) tidak bisa dibuka, terminal tetap jalan di
+   80x24 — cek field `resize` di `/healthz`.
+
+6. **Aset `xterm.js` tidak ikut ter-bundle.** `assets/web/` di repo cuma berisi
    `index.html`; kalau build Gradle dari clone bersih tanpa menjalankan
    `fetch-assets.sh`, halaman jadi hitam kosong tanpa pesan. Sekarang tugas
    Gradle `downloadWebAssets` mengunduh `xterm.js/xterm.css/fit.js` otomatis
@@ -106,7 +119,7 @@ Penyebab yang sudah pernah terjadi (dan sudah diperbaiki di kode ini):
 - [x] Replay scrollback ke client yang connect belakangan
 - [x] Supervisor sesi: auto-restart shell + pesan status ke client
 - [x] `/healthz` + `tools/ws-smoke.py` untuk diagnosis
-- [ ] Resize PTY (TIOCSWINSZ) saat window resize — sekarang fallback 80x24
+- [x] Resize PTY (TIOCSWINSZ) mengikuti ukuran window browser (kanal `/ctl`)
 - [ ] Streaming progress download rootfs tanpa menaruh tar.gz di APK (fallback URL di bootstrap.json)
 - [ ] Backup/export rootfs sekali tap
 - [ ] Multi-distro picker

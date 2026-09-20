@@ -67,13 +67,33 @@
     fit = new FitAddon.FitAddon();
     term.loadAddon(fit);
   }
-  function doFit() { try { if (fit) fit.fit(); } catch (e) {} }
+  function doFit() { try { if (fit) fit.fit(); } catch (e) {} sendSize(); }
   doFit();
   window.addEventListener('resize', doFit);
+  term.onResize(function () { sendSize(); });
 
   var ws = null;
+  var ctl = null;
   var retries = 0;
   var closedByServer = false;
+
+  // ---- kanal kontrol (/ctl): resize PTY, terpisah dari aliran data terminal ----
+  function sendSize() {
+    if (!ctl || ctl.readyState !== WebSocket.OPEN) return;
+    ctl.send(JSON.stringify({ type: 'resize', rows: term.rows, cols: term.cols }));
+  }
+
+  function connectCtl() {
+    var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    ctl = new WebSocket(proto + '//' + location.host + '/ctl');
+    ctl.onopen = function () { sendSize(); };
+    ctl.onmessage = function (e) {
+      // server minta ukuran ulang (mis. setelah sesi shell di-restart)
+      if (e.data && String(e.data).indexOf('need-size') >= 0) sendSize();
+    };
+    ctl.onclose = function () { setTimeout(connectCtl, 3000); };
+    ctl.onerror = function () {};
+  }
 
   function setStatus(text, ok) {
     statusEl.textContent = text;
@@ -128,6 +148,7 @@
 
   document.addEventListener('click', function () { term.focus(); });
   connect();
+  connectCtl();
 })();
 </script>
 </body>

@@ -9,6 +9,7 @@
  * Sehingga app melihat "tty" seolah-olah pipe. TODO: protocol resize (TIOCSWINSZ).
  */
 #include <errno.h>
+#include <fcntl.h>
 #include <pty.h>
 #include <poll.h>
 #include <signal.h>
@@ -16,13 +17,57 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/socket.h>
 #include <sys/types.h>
+#include <sys/un.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
-static void relay(int master) {
-    struct pollfd pf[2];
+/*
+ * Kanal kontrol resize: unix datagram socket di $LINUXBOX_CTRL_SOCK.
+ * Java tidak punya ioctl(), jadi TIOCSWINSZ dilakukan di sini; app cukup
+ * mengirim datagram berisi "<rows> <cols>\n". Dipilih socket (bukan menyisipkan
+ * escape sequence ke stdin) supaya perintah kontrol tidak pernah tercampur
+ * dengan ketikan user.
+ */
+static int ctrl_setup(const char *path) {
+    if (path == NULL || *path == '\0') return -1;
+    unlink(path);
+    int fd = socket(AF_UNIX, SOCK_DGRAM, 0);
+    if (fd < 0) return -1;
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
+    if (bind(fd, (struct sockaddr *) &addr, sizeof(addr)) < 0) {
+        close(fd);
+        return -1;
+    }
+    int fl = fcntl(fd, F_GETFL);
+    if (fl >= 0) fcntl(fd, F_SETFL, fl | O_NONBLOCK);
+    return fd;
+}
+
+static void ctrl_handle(int fd, int master) {
+    char buf[128];
+    ssize_t n = recv(fd, buf, sizeof(buf) - 1, 0);
+    if (n <= 0) return;
+    buf[n] = '\0';
+    int rows = 0, cols = 0;
+    if (sscanf(buf, "%d %d", &rows, &cols) != 2) return;
+    if (rows <= 0 || cols <= 0 || rows > 1000 || cols > 1000) return;
+    struct winsize ws;
+    memset(&ws, 0, sizeof(ws));
+    ws.ws_row = (unsigned short) rows;
+    ws.ws_col = (unsigned short) cols;
+    /* kernel mengirim SIGWINCH ke foreground process group bila ukuran berubah */
+    ioctl(master, TIOCSWINSZ, &ws);
+}
+
+static void relay(int master, int ctrl_fd) {
+    struct pollfd pf[3];
     char buf[4096];
+    int nfds = (ctrl_fd >= 0) ? 3 : 2;
     for (;;) {
         pf[0].fd = master;
         pf[0].events = POLLIN;
@@ -30,11 +75,19 @@ static void relay(int master) {
         pf[1].fd = STDIN_FILENO;
         pf[1].events = POLLIN;
         pf[1].revents = 0;
+        if (ctrl_fd >= 0) {
+            pf[2].fd = ctrl_fd;
+            pf[2].events = POLLIN;
+            pf[2].revents = 0;
+        }
 
-        int res = poll(pf, 2, -1);
+        int res = poll(pf, nfds, -1);
         if (res < 0) {
             if (errno == EINTR) continue;
             break;
+        }
+        if (ctrl_fd >= 0 && (pf[2].revents & POLLIN)) {
+            ctrl_handle(ctrl_fd, master);
         }
         if (pf[0].revents & (POLLIN | POLLHUP | POLLERR)) {
             ssize_t n = read(master, buf, sizeof(buf));
@@ -71,11 +124,13 @@ int main(int argc, char **argv) {
         fprintf(stderr, "usage: ptylauncher <cmd> [args...]\n");
         return 2;
     }
+    const char *ctrl_path = getenv("LINUXBOX_CTRL_SOCK");
     int master, slave;
     if (openpty(&master, &slave, NULL, NULL, NULL) != 0) {
         perror("openpty");
         return 1;
     }
+    int ctrl_fd = ctrl_setup(ctrl_path);
 
     /* Ukuran PTY bawaan kernel adalah 0x0. Kalau dibiarkan, shell/pager
        (bash, less, top, ...) mengira terminal lebarnya 0 kolom dan hasilnya
@@ -110,9 +165,11 @@ int main(int argc, char **argv) {
         _exit(127);
     }
     close(slave);
-    relay(master);
+    relay(master, ctrl_fd);
     int status = 0;
     while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
     close(master);
+    if (ctrl_fd >= 0) close(ctrl_fd);
+    if (ctrl_path != NULL) unlink(ctrl_path);
     return status;
 }
