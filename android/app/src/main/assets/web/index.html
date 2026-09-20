@@ -101,6 +101,20 @@
     color: var(--fg); border: 1px solid var(--line); border-radius: 5px;
     font: 12px monospace; cursor: pointer;
   }
+  #copyBtn {
+    position: fixed; right: 14px; bottom: 96px; z-index: 15;
+    display: none; padding: 9px 18px; background: var(--accent); color: #0b0e14;
+    border: none; border-radius: 20px; font: 13px monospace; font-weight: 700;
+    box-shadow: 0 2px 12px rgba(0, 0, 0, .5);
+  }
+  #copyBtn.show { display: block; }
+  #flash {
+    position: fixed; left: 50%; bottom: 132px; transform: translateX(-50%);
+    z-index: 16; display: none; padding: 7px 14px; background: #1b2230;
+    color: var(--fg); border: 1px solid var(--line); border-radius: 5px;
+    font: 12px monospace;
+  }
+  #flash.show { display: block; }
   #search {
     flex: 0 0 auto; display: none; align-items: center; gap: 6px;
     padding: 6px 8px; background: var(--bar); border-bottom: 1px solid var(--line);
@@ -162,6 +176,8 @@
     <span id="state" class="wait">menyambung…</span>
     <span id="info"></span>
   </div>
+  <button id="copyBtn">Salin</button>
+  <div id="flash"></div>
 </div>
 <div id="overlay"><div class="spinner"></div><div class="big" id="ovText">Menyambung…</div><div class="small" id="ovHint"></div></div>
 <pre id="fatal"></pre>
@@ -518,63 +534,148 @@
     }
   });
 
-  // ---------- gestur sentuh: scroll ----------
-  // Menggulir lewat touch: xterm 6 punya lapisan Gesture sendiri di document
-  // (preventDefault) yang justru mematikan scroll di WebView Android. Kita
-  // bekukan (stopPropagation di fase capture) lalu scroll manual via
-  // term.scrollLines. Tap tetap menghasilkan click -> keyboard terbuka seperti
-  // biasa; geser hanya menggulir (tanpa click/keyboard).
-  var LINE_H = 20;
+  // ---------- gestur sentuh: scroll & seleksi ----------
+  // xterm 6 punya lapisan Gesture sendiri di document (preventDefault) yang
+  // mematikan scroll di WebView Android -> dibekukan (stopPropagation capture)
+  // lalu ditangani manual. Pola:
+  //   tap (tanpa gerak)       -> click -> keyboard terbuka
+  //   geser cepat             -> term.scrollLines, keyboard ditutup
+  //   tahan ~0,4 dtk lalu tarik -> seleksi MANUAL by-cell: xterm yang mengecat
+  //     highlight birunya sendiri (tidak bergantung seleksi native WebView yang
+  //     di sini cuma memunculkan menu "Tempel" / highlight tak terlihat).
+  // Setelah lepas, tombol "Salin" muncul kalau ada teks terseleksi.
+  var LINE_H = 20, CELL_W = 9;
   function cellDims() {
     try {
       var scr = termEl.querySelector('.xterm-screen');
       var r = scr.getBoundingClientRect();
-      if (r.width > 0 && r.height > 0 && term.rows > 0) {
-        LINE_H = r.height / term.rows;
+      if (r.width > 0 && r.height > 0 && term.rows > 0 && term.cols > 0) {
+        CELL_W = r.width / term.cols; LINE_H = r.height / term.rows;
         return true;
       }
     } catch (e) {}
-    try { LINE_H = Math.ceil((term.options.fontSize || 14) * 1.35); } catch (e2) {}
+    try {
+      var fs = term.options.fontSize || 14;
+      LINE_H = Math.ceil(fs * 1.35); CELL_W = Math.ceil(fs * 0.62);
+    } catch (e2) {}
     return false;
   }
+  var gsMoved = false;
   if ('ontouchstart' in window) {
     document.documentElement.classList.add('touch');
-    var gsY = 0, gsMoved = false;
+    var gsX = 0, gsY = 0, gsMode = 'wait', gsSelFrom = null, gsHoldTimer = null;
+    var blurEditable = function () {
+      var ae = document.activeElement;
+      if (ae && ae.blur && ae !== document.body && ae !== document.documentElement) ae.blur();
+    };
+    function cellAt(x, y) {
+      cellDims();
+      var scr = termEl.querySelector('.xterm-screen');
+      var r = scr.getBoundingClientRect();
+      var col = Math.floor((x - r.left) / CELL_W);
+      var row = Math.floor((y - r.top) / LINE_H);
+      col = Math.max(0, Math.min(col, term.cols - 1));
+      row = Math.max(0, Math.min(row, term.rows - 1));
+      return { col: col, row: row };
+    }
+    function extendSel(cur) {
+      var a = gsSelFrom.row * term.cols + gsSelFrom.col;
+      var b = cur.row * term.cols + cur.col;
+      var o = Math.min(a, b), e = Math.max(a, b);
+      term.select(o % term.cols, Math.floor(o / term.cols), e - o + 1);
+    }
     var ges = termEl;
     ges.addEventListener('touchstart', function (e) {
       e.stopPropagation();
       var t = e.touches[0];
-      gsY = t.clientY; gsMoved = false;
+      gsX = t.clientX; gsY = t.clientY;
+      gsMode = 'wait'; gsSelFrom = null; gsMoved = false;
+      if (term.getSelection()) term.clearSelection();
+      blurEditable();   // cabut fokus textarea: keyboard & menu "Tempel" mati
+      if (gsHoldTimer) { clearTimeout(gsHoldTimer); gsHoldTimer = null; }
+      gsHoldTimer = setTimeout(function () {
+        if (gsMode !== 'wait') return;
+        gsMode = 'select';
+        gsSelFrom = cellAt(gsX, gsY);
+        term.select(gsSelFrom.col, gsSelFrom.row, 1);
+        try { navigator.vibrate && navigator.vibrate(12); } catch (e3) {}
+      }, 390);
     }, { capture: true, passive: true });
     ges.addEventListener('touchmove', function (e) {
       e.stopPropagation();
+      if (gsMode === 'select') {
+        e.preventDefault();
+        extendSel(cellAt(e.touches[0].clientX, e.touches[0].clientY));
+        return;
+      }
       var t = e.touches[0];
       var dy = t.clientY - gsY;
-      if (!gsMoved && Math.abs(dy) < 8) return;
-      if (!gsMoved) {
-        gsMoved = true;
-        // mulai geser: tutup keyboard. textarea xterm yang ter-fokus membuat
-        // Android memunculkan soft keyboard melulu — blur biar scroll bersih.
-        var ae = document.activeElement;
-        if (ae && ae.blur && ae !== document.body) ae.blur();
-      }
+      if (Math.abs(dy) < 8) return;
+      if (gsHoldTimer) { clearTimeout(gsHoldTimer); gsHoldTimer = null; }
       gsMoved = true;
+      blurEditable();   // mulai geser: keyboard ditutup
       e.preventDefault();
-      cellDims();
       var lines = Math.round(dy / LINE_H);
-      if (lines !== 0) {
-        term.scrollLines(-lines);
-        gsY = t.clientY;
-      }
+      if (lines !== 0) { term.scrollLines(-lines); gsY = t.clientY; }
     }, { capture: true, passive: false });
     ges.addEventListener('touchend', function (e) {
       e.stopPropagation();
-      if (gsMoved) e.preventDefault();
+      if (gsHoldTimer) { clearTimeout(gsHoldTimer); gsHoldTimer = null; }
+      if (gsMode === 'select') {
+        e.preventDefault();   // jangan jadi click -> keyboard
+        var sel = term.getSelection();
+        if (sel && sel.trim()) copyBtn.classList.add('show');
+        else copyBtn.classList.remove('show');
+      } else if (gsMoved) {
+        e.preventDefault();
+      }
+      gsMode = 'wait';
       gsMoved = false;
     }, { capture: true, passive: false });
-    ges.addEventListener('touchcancel', function (e) { e.stopPropagation(); gsMoved = false; },
-        { capture: true, passive: false });
+    ges.addEventListener('touchcancel', function (e) {
+      e.stopPropagation();
+      if (gsHoldTimer) { clearTimeout(gsHoldTimer); gsHoldTimer = null; }
+      if (gsMode === 'select') {
+        var sel = term.getSelection();
+        if (sel && sel.trim()) copyBtn.classList.add('show');
+      }
+      gsMode = 'wait';
+      gsMoved = false;
+    }, { capture: true, passive: false });
   }
+
+  // ---------- salin ke clipboard ----------
+  // Seleksi memakai term.select (highlight xterm terlihat jelas). Tombol Salin
+  // muncul otomatis saat seleksi selesai; teks dikopi via textarea tak terlihat.
+  var copyBtn = document.getElementById('copyBtn');
+  var flashEl = document.getElementById('flash');
+  var flashTimer = null;
+  function flash(msg) {
+    flashEl.textContent = msg;
+    flashEl.classList.add('show');
+    if (flashTimer) clearTimeout(flashTimer);
+    flashTimer = setTimeout(function () { flashEl.classList.remove('show'); }, 900);
+  }
+  function selText() {
+    try { return (term.getSelection() + '') || ''; } catch (e) { return ''; }
+  }
+  function copyText(txt) {
+    if (!txt) return;
+    var ta = document.createElement('textarea');
+    ta.value = txt;
+    ta.setAttribute('readonly', '');
+    ta.style.cssText = 'position:fixed;top:0;left:0;width:1em;height:1em;opacity:.01;z-index:-1';
+    document.body.appendChild(ta);
+    ta.focus(); ta.select();
+    try { ta.setSelectionRange(0, ta.value.length); } catch (e) {}
+    var ok = false;
+    try { ok = document.execCommand('copy'); } catch (e) {}
+    document.body.removeChild(ta);
+    try { term.clearSelection(); } catch (e) {}
+    copyBtn.classList.remove('show');
+    flash(ok ? 'tersalin' : 'gagal menyalin');
+  }
+  copyBtn.addEventListener('click', function () { copyText(selText()); });
 
 // ---------- pencarian di terminal ----------
   var searchBar = document.getElementById('search');
