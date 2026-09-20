@@ -61,6 +61,22 @@ stage_native "$ASSETS/bin/libandroid-shmem.so" libandroid-shmem.so
 # proot Termux dikompilasi dengan PROOT_UNBUNDLE_LOADER=$PREFIX/libexec/proot,
 # jadi tanpa PROOT_LOADER ia mencari /data/data/com.termux/.../loader -> EACCES.
 stage_native "$PREFIX/libexec/proot/loader" libproot_loader.so
+# proroot (opsional, proprietary — boleh dipakai, tidak boleh didistribusi ulang):
+# 5 .so dari https://github.com/coderredlab/proroot (release binary, v1.2.8+).
+# Kalau tidak ada, app memakai proot klasik (fallback). PROROOT_DIR harusnya di
+# luar repo supaya tidak ter-commit.
+PROROOT_DIR="${PROROOT_DIR:-$HOME/proroot/arm64-v8a}"
+proroot_libs="libproroot.so libproroot-runtime.so libproroot-linker.so libproroot-bridge.so libproroot-stub-loader.so"
+found=0
+for lib in $proroot_libs; do
+    if [ -s "$PROROOT_DIR/$lib" ]; then
+        cp "$PROROOT_DIR/$lib" "$WORK/jni/lib/arm64-v8a/$lib"
+        found=$((found+1))
+    else
+        echo "  proroot: $lib tidak ada (di $PROROOT_DIR) -> fallback proot"
+    fi
+done
+[ "$found" -eq 5 ] && echo "  proroot: 5 .so disalin (engine proroot aktif untuk distro glibc)"
 chmod 755 "$WORK"/jni/lib/arm64-v8a/*
 echo "  jniLibs: $(ls "$WORK/jni/lib/arm64-v8a" | tr '\n' ' ')"
 

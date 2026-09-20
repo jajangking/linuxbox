@@ -140,11 +140,11 @@ public class WebTerminalServer {
                 .append(",\"shell\":\"")
                 .append(ProotSession.detectShell(ProotSession.activeRootfsDir(ctx)))
                 .append('"')
-                .append(",\"storage\":").append(SessionManager.hasStoragePermission(ctx));
-                        .append(",\"nativeShell\":").append(
-                                ProotSession.hasNativeShell(ProotSession.nativeLibraryDir(ctx)))
-                        .append(",\"proroot\":").append(
-                                ProotSession.hasProroot(ProotSession.nativeLibraryDir(ctx)));
+                .append(",\"storage\":").append(SessionManager.hasStoragePermission(ctx))
+                .append(",\"nativeShell\":").append(
+                        ProotSession.hasNativeShell(ProotSession.nativeLibraryDir(ctx)))
+                .append(",\"proroot\":").append(
+                        ProotSession.hasProroot(ProotSession.nativeLibraryDir(ctx)));
         String err = firstError();
         if (err != null) {
             sb.append(",\"lastError\":\"").append(err.replace("\"", "'").replace("\n", " ")).append('"');
