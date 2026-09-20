@@ -101,6 +101,9 @@
     color: var(--fg); border: 1px solid var(--line); border-radius: 5px;
     font: 12px monospace; cursor: pointer;
   }
+  #keys button.on {
+    background: var(--accent); color: #0b0e14; border-color: var(--accent);
+  }
   #copyBtn {
     position: fixed; right: 14px; bottom: 96px; z-index: 15;
     display: none; padding: 9px 18px; background: var(--accent); color: #0b0e14;
@@ -162,9 +165,8 @@
   <div id="keys">
     <button data-key="esc">esc</button>
     <button data-key="tab">tab</button>
-    <button data-key="ctrlc">^C</button>
-    <button data-key="ctrld">^D</button>
-    <button data-key="ctrlz">^Z</button>
+    <button data-key="ctrl">ctrl</button>
+    <button data-key="minus">-</button>
     <button data-key="up">↑</button>
     <button data-key="down">↓</button>
     <button data-key="left">←</button>
@@ -405,10 +407,26 @@
   }
 
   var KEYMAP = {
-    esc: '\x1b', tab: '\t', ctrlc: '\x03', ctrld: '\x04', ctrlz: '\x1a',
+    esc: '\x1b', tab: '\t', minus: '-',
     up: '\x1b[A', down: '\x1b[B', left: '\x1b[D', right: '\x1b[C',
     slash: '/', pipe: '|'
   };
+  // decoder tombol saat kunci "ctrl" (lock) aktif: kirim ^X seperti Termux
+  function ctrlKey(dk) {
+    switch (dk) {
+      case 'up': return '\x1b[1;5A';
+      case 'down': return '\x1b[1;5B';
+      case 'right': return '\x1b[1;5C';
+      case 'left': return '\x1b[1;5D';
+      case 'minus': return '\x1f';   // ^-
+      case 'slash': return '\x1f';   // ^/
+      case 'pipe': return '\x1c';    // ^|
+      case 'esc': return '\x1b';
+      case 'tab': return '\t';
+    }
+    return null;
+  }
+  var ctrlLock = false;
 
   function sendSize() {
     if (!ctl || ctl.readyState !== WebSocket.OPEN) return;
@@ -750,7 +768,14 @@
   });
   Array.prototype.forEach.call(document.querySelectorAll('#keys button'), function (b) {
     b.addEventListener('click', function () {
-      var k = KEYMAP[b.getAttribute('data-key')];
+      var dk = b.getAttribute('data-key');
+      if (dk === 'ctrl') {
+        ctrlLock = !ctrlLock;
+        b.classList.toggle('on', ctrlLock);
+        b.textContent = ctrlLock ? '^' : 'ctrl';
+        return;
+      }
+      var k = ctrlLock ? (ctrlKey(dk) || KEYMAP[dk]) : KEYMAP[dk];
       if (k && ws && ws.readyState === WebSocket.OPEN) ws.send(k);
       // jangan refokus textarea: itu hanya membuat soft keyboard muncul lagi.
     });
