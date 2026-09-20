@@ -101,6 +101,7 @@
     color: var(--fg); border: 1px solid var(--line); border-radius: 5px;
     font: 12px monospace; cursor: pointer;
   }
+  #keys button:disabled { opacity: .5; cursor: wait; }
   #keys button.on {
     background: var(--accent); color: #0b0e14; border-color: var(--accent);
   }
@@ -138,7 +139,7 @@
   .selection-handle::before { transform: translateX(var(--stem-offset, 0px)); }
   #flash {
     position: fixed; left: 50%; bottom: 132px; transform: translateX(-50%);
-    z-index: 16; display: none; padding: 7px 14px; background: #1b2230;
+    z-index: 40; display: none; padding: 7px 14px; background: #1b2230;
     color: var(--fg); border: 1px solid var(--line); border-radius: 5px;
     font: 12px monospace; pointer-events: none;
   }
@@ -158,6 +159,21 @@
     background: #1b2230; color: var(--fg); border: 1px solid var(--line);
     border-radius: 5px; padding: 5px 6px; font-size: 12px; max-width: 150px;
   }
+  #pasteDialog {
+    position: fixed; inset: 0; z-index: 30; background: rgba(11, 14, 20, .9);
+    padding: 16px; display: flex; align-items: center; justify-content: center;
+  }
+  #pasteDialog[hidden] { display: none; }
+  #pastePanel { width: 100%; max-width: 480px; padding: 16px; background: var(--bar); border-radius: 10px; }
+  #pastePanel h2 { margin: 0 0 8px; font-size: 16px; }
+  #pasteHint { color: var(--fg); }
+  #pasteInput {
+    width: 100%; height: 120px; max-height: 30vh; padding: 8px; resize: vertical;
+    background: var(--bg); color: var(--fg); border: 1px solid var(--dim);
+    border-radius: 5px; font: 14px monospace;
+  }
+  #pastePanel .buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+  #pastePanel button { min-height: 44px; }
   #fatal {
     display: none; color: var(--bad); font: 13px/1.6 monospace;
     padding: 16px; white-space: pre-wrap;
@@ -191,6 +207,7 @@
     <div id="selectionEnd" class="selection-handle" aria-label="Akhir seleksi"></div>
   </div>
   <div id="keys">
+    <button id="pasteBtn" title="Tempel teks dari papan klip">Tempel</button>
     <button data-key="esc">esc</button>
     <button data-key="tab">tab</button>
     <button data-key="ctrl">ctrl</button>
@@ -211,10 +228,21 @@
     <button id="cancelSelection">Batal</button>
     <button id="typeBtn">Ketik</button>
   </div>
-  <div id="flash"></div>
+  <div id="flash" role="status" aria-live="polite"></div>
 </div>
 <div id="overlay"><div class="spinner"></div><div class="big" id="ovText">Menyambung…</div><div class="small" id="ovHint"></div></div>
 <pre id="fatal"></pre>
+<div id="pasteDialog" role="dialog" aria-modal="true" aria-labelledby="pasteTitle" aria-describedby="pasteHint" hidden>
+  <div id="pastePanel">
+    <h2 id="pasteTitle">Tempel ke terminal</h2>
+    <p id="pasteHint"></p>
+    <textarea id="pasteInput" aria-label="Teks yang akan ditempel" placeholder="Tempel teks di sini…" spellcheck="false" autocapitalize="off" autocomplete="off"></textarea>
+    <div class="buttons">
+      <button class="act" id="pasteCancel">Batal</button>
+      <button class="act" id="pasteSend">Tempel ke terminal</button>
+    </div>
+  </div>
+</div>
 
 <script src="xterm.js"></script>
 <script src="fit.js"></script>
@@ -802,11 +830,11 @@
   var copyBtn = document.getElementById('copyBtn');
   var flashEl = document.getElementById('flash');
   var flashTimer = null;
-  function flash(msg) {
+  function flash(msg, duration) {
     flashEl.textContent = msg;
     flashEl.classList.add('show');
     if (flashTimer) clearTimeout(flashTimer);
-    flashTimer = setTimeout(function () { flashEl.classList.remove('show'); }, 900);
+    flashTimer = setTimeout(function () { flashEl.classList.remove('show'); }, duration || 900);
   }
   function selText() {
     try { return (term.getSelection() + '') || ''; } catch (e) { return ''; }
@@ -835,7 +863,108 @@
     finishSelection(); term.focus();
   });
 
-// ---------- pencarian di terminal ----------
+  // ---------- tempel dari clipboard ----------
+  var pasteBtn = document.getElementById('pasteBtn');
+  var pasteDialog = document.getElementById('pasteDialog');
+  var pasteInput = document.getElementById('pasteInput');
+  var pasteSend = document.getElementById('pasteSend');
+  var pasteCancel = document.getElementById('pasteCancel');
+  var pasteTarget = null;
+
+  function samePasteTarget(target) {
+    return target && target.session === sessionId && target.socket === ws &&
+        ws && ws.readyState === WebSocket.OPEN;
+  }
+  function closePasteDialog() {
+    pasteInput.blur();
+    pasteInput.value = ''; // jangan simpan rahasia clipboard di DOM setelah ditutup
+    pasteDialog.hidden = true;
+    pasteTarget = null;
+    pasteBtn.focus(); // fokus tombol tidak memunculkan keyboard
+  }
+  function sendPaste(text, target) {
+    if (!samePasteTarget(target)) {
+      flash('Sesi berubah atau terputus. Tekan Tempel lagi.', 3500);
+      return false;
+    }
+    if (!text) { flash('Papan klip kosong atau tidak berisi teks.', 3000); return false; }
+    finishSelection();
+    // Lewat xterm, bukan ws.send: hormati bracketed paste dan normalisasi CRLF.
+    // Jangan menambah Enter atau memfokuskan textarea terminal.
+    term.paste(text);
+    flash('ditempel');
+    return true;
+  }
+  function showPasteDialog(target, text, manual) {
+    if (!samePasteTarget(target)) {
+      flash('Sesi berubah atau terputus. Tekan Tempel lagi.', 3500);
+      return;
+    }
+    pasteTarget = target;
+    pasteInput.value = text;
+    document.getElementById('pasteHint').textContent = manual
+        ? 'Browser tidak mengizinkan akses papan klip langsung. Tekan lama kolom di bawah atau gunakan papan klip keyboard, lalu periksa teks sebelum menempel. Baris baru dapat menjalankan perintah.'
+        : 'Teks berisi beberapa baris atau karakter kontrol yang dapat menjalankan perintah. Periksa dulu sebelum menempel.';
+    pasteDialog.hidden = false;
+    // Hanya fallback manual membutuhkan keyboard; pratinjau cukup fokus tombol.
+    if (manual) pasteInput.focus();
+    else { blurEditable(); pasteSend.focus(); }
+  }
+  function readClipboardText() {
+    // WebView Android tidak menyediakan navigator.clipboard.readText secara andal.
+    // Prompt khusus diproses native, dengan pemeriksaan origin di WebViewActivity.
+    if (navigator.userAgent.indexOf('LinuxBoxWebView/1') >= 0) {
+      var result = JSON.parse(window.prompt('linuxbox:clipboard-read', '') || '{}');
+      if (result.status === 'ok' && typeof result.text === 'string') return Promise.resolve(result.text);
+      if (result.status === 'empty') return Promise.resolve('');
+      return Promise.reject(new Error('clipboard native tidak tersedia'));
+    }
+    if (navigator.clipboard && typeof navigator.clipboard.readText === 'function') {
+      return navigator.clipboard.readText();
+    }
+    return Promise.reject(new Error('clipboard browser tidak tersedia'));
+  }
+  pasteBtn.addEventListener('mousedown', function (e) { e.preventDefault(); });
+  pasteBtn.addEventListener('click', function () {
+    if (pasteBtn.disabled || !pasteDialog.hidden) return;
+    var target = { session: sessionId, socket: ws };
+    if (!samePasteTarget(target)) {
+      flash('Terminal belum terhubung. Sambungkan dulu.', 3000);
+      return;
+    }
+    pasteBtn.disabled = true;
+    var read;
+    // Mulai pembacaan dalam user gesture agar izin clipboard browser berlaku.
+    try { read = readClipboardText(); }
+    catch (e) { read = Promise.reject(e); }
+    Promise.resolve(read).then(function (text) {
+      if (typeof text !== 'string') { showPasteDialog(target, '', true); return; }
+      if (/[\r\n\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(text)) showPasteDialog(target, text, false);
+      else sendPaste(text, target);
+    }, function () {
+      showPasteDialog(target, '', true);
+    }).then(function () { pasteBtn.disabled = false; }, function () {
+      pasteBtn.disabled = false;
+      flash('Gagal menempel. Coba lagi.', 3000);
+    });
+  });
+  pasteSend.addEventListener('click', function () {
+    if (sendPaste(pasteInput.value, pasteTarget)) closePasteDialog();
+  });
+  pasteCancel.addEventListener('click', closePasteDialog);
+  pasteDialog.addEventListener('click', function (e) {
+    if (e.target === pasteDialog) closePasteDialog();
+  });
+  pasteDialog.addEventListener('keydown', function (e) {
+    e.stopPropagation(); // shortcut terminal/Cari tidak boleh mengambil fokus dialog
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closePasteDialog(); }
+    if (e.key === 'Tab') {
+      if (e.shiftKey && document.activeElement === pasteInput) { e.preventDefault(); pasteSend.focus(); }
+      else if (!e.shiftKey && document.activeElement === pasteSend) { e.preventDefault(); pasteInput.focus(); }
+    }
+  });
+
+  // ---------- pencarian di terminal ----------
   var searchBar = document.getElementById('search');
   var searchInput = document.getElementById('searchInput');
   var searchCount = document.getElementById('searchCount');
@@ -901,6 +1030,7 @@
       '• Cari (Ctrl-F) untuk mencari di scrollback; tautan bisa diklik.\n' +
       '• Tahan teks lalu tarik untuk memilih; geser marker awal/akhir untuk menyesuaikan.\n' +
       '• Salin menyalin seleksi, Batal menutupnya, Ketik membuka keyboard lagi.\n' +
+      '• Tempel membaca papan klip; teks beberapa baris diperiksa sebelum dikirim.\n' +
       '• Pilihan distro di sebelah "+ Sesi" menentukan distro sesi baru,\n' +
       '  jadi satu tab bisa alpine dan tab lain ubuntu.\n' +
       '• status "sdcard ✓" berarti /sdcard di-bind ke dalam guest.\n\n' +
@@ -909,7 +1039,7 @@
       (prorootOk ? 'proroot tersedia: distro glibc jalan tanpa ptrace.'
                  : 'proroot tidak ada di APK: distro jalan lewat proot klasik.'));
   });
-  Array.prototype.forEach.call(document.querySelectorAll('#keys button'), function (b) {
+  Array.prototype.forEach.call(document.querySelectorAll('#keys button[data-key]'), function (b) {
     b.addEventListener('click', function () {
       var dk = b.getAttribute('data-key');
       if (dk === 'ctrl') {

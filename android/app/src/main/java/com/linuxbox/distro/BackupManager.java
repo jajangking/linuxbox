@@ -55,25 +55,25 @@ public final class BackupManager {
             throw new IOException("tidak bisa membuat " + dir.getAbsolutePath());
         }
         String ext = encrypt ? ".tar.gz" + Crypto.EXTENSION : ".tar.gz";
-        File out = new File(dir, "linuxbox-" + id + "-" + stamp + ext);
+        // Nama unik: mencoba ulang di menit yang sama tidak menimpa backup lama,
+        // dan cleanup kegagalan hanya menghapus berkas milik percobaan ini.
+        File out = File.createTempFile("linuxbox-" + id + "-" + stamp + "-", ext, dir);
         // Tar ditulis ke berkas sementara dulu: kalau enkripsi gagal di tengah
         // jalan, tidak ada tar.gz setengah jadi yang tertinggal di folder backup.
-        File plain = encrypt
-                ? new File(dir, ".tmp-" + stamp + "-" + System.currentTimeMillis() + ".tar.gz")
-                : out;
+        File plain = encrypt ? new File(dir, ".tmp-" + out.getName() + ".tar.gz") : out;
 
         if (log != null) {
             log.log("Membuat backup " + rootfs.getName() + (encrypt ? " (terenkripsi)" : "") + "...");
             if (encrypt) log.log("  " + Crypto.describe());
         }
         long t0 = System.currentTimeMillis();
-        int entries = TarUtil.createTarGz(rootfs, plain, log);
-        if (entries == 0) {
-            plain.delete();
-            throw new IOException("rootfs kosong, backup dibatalkan");
-        }
+        int entries;
         boolean ok = false;
         try {
+            // Lindungi tahap tar juga: kegagalan library/I/O di sini tidak boleh
+            // meninggalkan arsip gagal atau plaintext sementara backup terenkripsi.
+            entries = TarUtil.createTarGz(rootfs, plain, log);
+            if (entries == 0) throw new IOException("rootfs kosong, backup dibatalkan");
             if (encrypt) {
                 if (log != null) log.log("  mengenkripsi...");
                 Crypto.encrypt(plain, out, passphrase);

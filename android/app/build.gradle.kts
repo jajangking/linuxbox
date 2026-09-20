@@ -42,6 +42,11 @@ android {
 
 dependencies {
     implementation("org.apache.commons:commons-compress:1.26.2")
+    // Eksplisit agar jalur Gradle dan build manual memakai runtime yang sama.
+    // Selaraskan juga scripts/fetch-java-deps.sh saat mengganti versi.
+    implementation("commons-io:commons-io:2.16.1")
+    implementation("org.apache.commons:commons-lang3:3.14.0")
+    implementation("commons-codec:commons-codec:1.17.0")
 }
 // --- aset web terminal (xterm.js) -------------------------------------------
 // Build dari clone bersih lewat Android Studio/Gradle: assets/web/ cuma berisi

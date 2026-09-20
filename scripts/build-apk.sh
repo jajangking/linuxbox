@@ -17,8 +17,6 @@ ANDROID_JAR="${ANDROID_JAR:-$HOME/androidjar/android-13/android.jar}"
 AAPT_FRAMEWORK="${AAPT_FRAMEWORK:-/system/framework/framework-res.apk}"
 CC_TARGET="${CC_TARGET:-aarch64-linux-android35}"
 DEX_API="${DEX_API:-26}"
-COMMONS_URL="${COMMONS_URL:-https://repo1.maven.org/maven2/org/apache/commons/commons-compress/1.26.2/commons-compress-1.26.2.jar}"
-COMMONS_IO_URL="${COMMONS_IO_URL:-https://repo1.maven.org/maven2/commons-io/commons-io/2.16.1/commons-io-2.16.1.jar}"
 
 cmds=(javac jar d8 aapt2 apksigner adb curl keytool clang tar sha256sum)
 for c in "${cmds[@]}"; do command -v "$c" >/dev/null || { echo "butuh: $c" >&2; exit 1; }; done
@@ -119,19 +117,17 @@ cat > "$ASSETS/bootstrap.json" <<EOF
 EOF
 
 echo "[6] deps"
-curl -fsSL -o "$WORK/libs/commons-compress.jar" "$COMMONS_URL"
-curl -fsSL -o "$WORK/libs/commons-io.jar" "$COMMONS_IO_URL"
+bash "$ROOT/scripts/fetch-java-deps.sh" "$WORK/libs"
 
 echo "[7] javac"
 JAVAS=$(find "$SRC/java" -name '*.java')
-javac --release 11 -cp "$ANDROID_JAR:$WORK/libs/commons-compress.jar" -d "$GEN" $JAVAS
+javac --release 11 -cp "$ANDROID_JAR:$WORK/libs/*" -d "$GEN" $JAVAS
 
 echo "[8] d8"
 jar cf "$WORK/classes.jar" -C "$GEN" .
 d8 --min-api "$DEX_API" --output "$WORK/dex" \
-   "$WORK/classes.jar" "$WORK/libs/commons-compress.jar" "$WORK/libs/commons-io.jar" \
-   --lib "$ANDROID_JAR" 2>/dev/null
-cp "$WORK"/dex/*.dex "$WORK/classes.dex"
+   "$WORK/classes.jar" "$WORK"/libs/*.jar \
+   --lib "$ANDROID_JAR"
 
 echo "[9] aapt2 link (manifest + assets)"
 aapt2 link -o "$WORK/unsigned.apk" \
@@ -145,8 +141,10 @@ aapt2 link -o "$WORK/unsigned.apk" \
 
 echo "[10] inject dex + jniLibs"
 (
-cd "$WORK"
-jar uf unsigned.apk classes.dex
+# Dependensi tambahan dapat menghasilkan multidex. Masukkan semuanya, bukan
+# hanya classes.dex; minSdk >= 26 mendukung multidex secara native.
+cd "$WORK/dex"
+jar uf "$WORK/unsigned.apk" classes*.dex
 )
 (
 cd "$WORK/jni"

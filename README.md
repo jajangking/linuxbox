@@ -221,6 +221,66 @@ unzip -p termux-app.apk lib/arm64-v8a/libbusybox.so \
   tidak terbaca) …`). Kalau baris itu menunjukkan `sha256 0/3`, unduhan tidak
   akan diverifikasi — itu tanda aset di APK usang.
 
+### Error backup: `commons/lang3/SystemProperties`
+
+Jika Backup biasa dan terenkripsi sama-sama berhenti dengan:
+
+```text
+Failed resolution of: Lorg/apache/commons/lang3/SystemProperties;
+```
+
+penyebabnya adalah dependensi **Java di APK** yang tidak lengkap, bukan paket
+Ubuntu atau passphrase. Commons Compress 1.26.2 membutuhkan Commons Lang3 saat
+membuat entri TAR. Keduanya gagal pada tahap TAR yang sama, sebelum enkripsi.
+Memasang paket lewat `apt` di Ubuntu tidak memperbaiki classpath aplikasi Android.
+
+Jalur build manual kini memakai `scripts/fetch-java-deps.sh` untuk mengunduh dan
+memeriksa empat JAR, lalu memasukkan **semuanya** ke `javac` dan D8:
+
+| Library | Versi |
+| --- | --- |
+| commons-compress | 1.26.2 |
+| commons-io | 2.16.1 |
+| commons-lang3 | 3.14.0 |
+| commons-codec | 1.17.0 |
+
+Versi diselaraskan dengan `android/app/build.gradle.kts`. Unduhan Lang3 tanpa
+kelas `SystemProperties` ditolak saat build; diagnostik D8 tidak disembunyikan,
+dan semua `classes*.dex` dimasukkan ke APK jika hasilnya multidex. Untuk mirror
+Maven, tersedia override `COMMONS_URL`, `COMMONS_IO_URL`, `COMMONS_LANG3_URL`,
+dan `COMMONS_CODEC_URL` (berisi URL JAR lengkap).
+
+Rebuild APK, kemudian **pasang sebagai update menggunakan keystore yang sama**:
+
+```bash
+bash scripts/build-apk.sh   # di lingkungan build Termux yang sudah disiapkan
+adb install -r out/linuxbox.apk
+```
+
+**Jangan uninstall atau hapus data LinuxBox**: rootfs Ubuntu berada di data
+aplikasi. Hentikan server, pastikan distro aktif yang benar, lalu coba Backup
+lagi setelah update. Arsip dari percobaan gagal bukan backup yang valid.
+Percobaan backup baru memakai nama unik dan membersihkan arsip gagal, termasuk
+plaintext sementara saat backup terenkripsi gagal pada tahap TAR.
+
+Pengujian dependensi/packaging offline (compiler, D8 dan download dimock):
+
+```bash
+python3 -m unittest discover -s tests/packaging -v
+```
+
+Smoke test JVM untuk backup/restore biasa dan terenkripsi, memakai implementasi
+`TarUtil`/`Crypto` asli dan fixture kecil (bukan rootfs pengguna):
+
+```bash
+# Butuh JDK 11+ (java, javac, jar), curl, dan akses Maven Central.
+bash scripts/test-backup.sh
+```
+
+Smoke test juga membuktikan hilangnya Lang3 memicu error `SystemProperties`,
+lalu menguji konten file, symlink, executable, nama panjang, dan penolakan
+passphrase salah dengan classpath lengkap. Ini tidak menggantikan uji APK di HP.
+
 ### Backup terenkripsi (passphrase)
 
 Tombol *Backup* menanyakan passphrase. Kosongkan → `tar.gz` biasa seperti
@@ -287,13 +347,25 @@ open(dst, "wb").write(AESGCM(key).decrypt(raw[20:32], raw[32:], None))
   Menyeleksi/menyalin tidak otomatis membuka keyboard; jika clipboard ditolak
   browser, seleksi tetap tersedia untuk dicoba ulang. Resize grid/PTY ditunda
   selama seleksi aktif agar animasi penutupan keyboard tidak menghapus seleksi.
+- **Tempel di HP**: tombol **Tempel** di awal baris tombol terminal membaca
+  teks clipboard hanya saat ditekan, tanpa menambah Enter atau membuka keyboard
+  terminal. Di WebView bawaan aplikasi, clipboard dibaca melalui Android;
+  permintaan dibatasi ke halaman terminal pada origin awal (scheme/host/port),
+  bukan halaman/iframe eksternal. Browser biasa memakai Clipboard API. Jika
+  akses ditolak/tidak tersedia (misalnya lewat HTTP LAN), muncul kolom tempel
+  manual: tekan lama kolom itu atau gunakan clipboard keyboard, kemudian tekan
+  **Tempel ke terminal**. Teks dengan baris baru/karakter kontrol harus diperiksa
+  dulu karena bisa menjalankan perintah. **Batal** tidak mengirim apa pun.
+  Pengiriman memakai `term.paste()` agar bracketed-paste aplikasi terminal tetap
+  dihormati. Jika sesi berubah/koneksi putus selama izin clipboard ditunggu,
+  teks tidak dikirim ke sesi lain.
 - Tombol: bersihkan layar, `A−`/`A+` ukuran huruf, sambung ulang, bantuan.
 - Di HP muncul baris tombol sentuh (esc, tab, `^C`, `^D`, `^Z`, panah, `/`, `|`)
   karena keyboard virtual tidak punya tombol itu.
 - Indikator status di bawah: terhubung / menyambung ulang / server tidak
   merespons, plus jumlah sesi, distro, dan shell.
 
-### Pengujian seleksi terminal
+### Pengujian seleksi dan tempel terminal
 
 Pengujian browser memakai xterm 6 dan FitAddon asli, dengan backend PTY dan
 clipboard pengganti (tidak memerlukan Android SDK atau sesi Linux aktif):
@@ -309,7 +381,11 @@ npm run test:web
 Cakupan: long-press, seleksi terbalik/lintas baris, kedua marker termasuk satu
 karakter di tepi layar, scrollback, scroll saat seleksi, pembatalan gestur,
 kegagalan clipboard, fokus Cari/Ketik, resize saat keyboard menutup, perubahan
-font, ganti sesi/bersihkan, dan seleksi mouse desktop.
+font, ganti sesi/bersihkan, dan seleksi mouse desktop. Pengujian Tempel mencakup
+Unicode/spasi, tidak menambah Enter, bracketed-paste/CRLF, konfirmasi beberapa
+baris/karakter kontrol, clipboard kosong/ditolak/tidak tersedia, fallback manual,
+sesi berganti/koneksi putus saat menunggu clipboard, serta kanal WebView yang
+**dimock** (bukan pembacaan clipboard Android asli).
 
 Tetap lakukan uji pada HP setelah rebuild APK dan muat ulang halaman terminal:
 1. Buka keyboard, tahan sebagian output, lalu tarik: keyboard menutup dan
@@ -319,6 +395,13 @@ Tetap lakukan uji pada HP setelah rebuild APK dan muat ulang halaman terminal:
 3. Ulangi pada output lama di scrollback dan seleksi lintas baris.
 4. **Batal** menutup seleksi tanpa keyboard; **Ketik** membuka keyboard dan
    input terminal kembali normal.
+5. Salin teks dari aplikasi lain, tekan **Tempel** di terminal bawaan LinuxBox:
+   teks masuk tanpa Enter tambahan atau keyboard yang tiba-tiba terbuka.
+   Ulangi dengan beberapa baris: pratinjau harus muncul dan **Batal** tidak
+   mengirim apa pun. Pastikan clipboard kosong menampilkan pesan yang sesuai.
+6. Buka terminal melalui browser dengan akses clipboard ditolak/HTTP LAN:
+   uji kolom tempel manual, kirim dan batalkan. Pastikan teks tidak dikirim ke
+   terminal sebelum tombol **Tempel ke terminal** ditekan.
 
 Emulasi browser hanya memverifikasi fokus/input dan perubahan viewport, bukan
 IME/clipboard sistem Android yang sebenarnya.
