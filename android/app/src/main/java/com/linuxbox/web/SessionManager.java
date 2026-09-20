@@ -68,6 +68,10 @@ public final class SessionManager {
         public final String kind;
         /** Mesin yang terakhir dipakai: proot / proroot / native (untuk ditampilkan). */
         public volatile String engine = "";
+        /** Isi bukan kosong = paksa pakai mesin ini (dipakai saat proroot gagal). */
+        public volatile String forcedEngine = "";
+        /** Berapa kali berturut-turut sesi mati <3 detik setelah start. */
+        volatile int shortRuns;
         public final long createdAt;
         public volatile String name;
         public volatile int rows = 24;
@@ -417,9 +421,20 @@ public final class SessionManager {
 
             // Shell yang mati <3 detik setelah start = kegagalan, jangan spam.
             if (System.currentTimeMillis() - startedAt < 3000L) {
+                s.shortRuns++;
                 delay = Math.min(delay * 2, RESTART_MAX_MS);
             } else {
+                s.shortRuns = 0;
                 delay = RESTART_MIN_MS;
+            }
+            // proroot yang menolak start (mis. rootfs/toolchain tidak cocok)
+            // bikin loop restart tanpa henti. Dua kali gagal cepat -> proot.
+            if (s.shortRuns >= 2 && ProotSession.Engine.PROROOT.id.equals(s.engine)) {
+                s.forcedEngine = ProotSession.Engine.PROOT.id;
+                s.shortRuns = 0;
+                delay = RESTART_MIN_MS;
+                notice(s, "\r\n[proroot gagal dua kali, jatuh ke proot klasik"
+                        + " untuk sesi ini]\r\n");
             }
             notice(s, "\r\n[sesi berakhir, memulai ulang...]\r\n");
             sleepQuietly(delay);
@@ -437,8 +452,11 @@ public final class SessionManager {
         if (hasStoragePermission(ctx)) {
             java.io.File ext = android.os.Environment.getExternalStorageDirectory();
             if (ext != null && ext.isDirectory()) {
-                binds.add(ext.getAbsolutePath());
-                binds.add("/sdcard");
+                // SATU entri berformat "host:guest". Dulu dikirim sebagai dua
+                // entri terpisah, jadi proot mem-bind /storage/emulated/0 ke
+                // dirinya sendiri dan /sdcard (yang belum tentu ada di host)
+                // ke /sdcard — hasilnya /sdcard di guest kosong atau gagal.
+                binds.add(ext.getAbsolutePath() + ":/sdcard");
             }
         }
         return binds;
@@ -469,7 +487,10 @@ public final class SessionManager {
         }
         java.io.File rootfs = ProotSession.rootfsDir(filesDir, s.distroId);
         // proroot kalau tersedia & rootfs-nya glibc; selain itu proot klasik.
-        ProotSession.Engine engine = ProotSession.engineFor(nativeLibDir, s.distroId);
+        // forcedEngine diisi kalau proroot sudah terbukti gagal di sesi ini.
+        ProotSession.Engine engine = ProotSession.Engine.PROOT.id.equals(s.forcedEngine)
+                ? ProotSession.Engine.PROOT
+                : ProotSession.engineFor(nativeLibDir, s.distroId);
         s.engine = engine.id;
         return PtyHelper.start(s.id, filesDir, nativeLibDir, rootfs,
                 ProotSession.buildCommand(engine, nativeLibDir, rootfs, extraBinds(ctx)),

@@ -209,7 +209,22 @@ public final class ProotSession {
         return cmd;
     }
 
-    /** Command proroot: tanpa ptrace, jadi tanpa --kill-on-exit dan pakai -w. */
+    /**
+     * Command proroot. Mengikuti contoh resminya:
+     * {@code libproroot.so -r <rootfs> -0 --link2symlink -w /root /bin/sh -l}
+     *
+     * Dua perbedaan penting dari proot yang sempat bikin loop restart di
+     * perangkat:
+     * <ul>
+     *   <li>proroot menolak bind berformat tunggal — pesannya "bad bind format
+     *       (expected host:guest)". Semua bind wajib ditulis
+     *       {@code host:guest}.</li>
+     *   <li>/proc, /sys, /dev TIDAK di-bind manual: proroot menyiapkannya
+     *       sendiri, dan perintah contoh yang dipakai untuk menguji Node,
+     *       Chromium sampai XFCE juga tidak mem-bind-nya.</li>
+     * </ul>
+     * proroot juga tidak punya --kill-on-exit, dan direktori kerja memakai -w.
+     */
     private static List<String> prorootCommand(String nativeLibDir, File rootfs,
                                                List<String> extraBind) {
         List<String> cmd = new ArrayList<>();
@@ -217,15 +232,12 @@ public final class ProotSession {
         cmd.add("-r"); cmd.add(rootfs.getAbsolutePath());
         cmd.add("--link2symlink");
         cmd.add("-0");
-        cmd.add("-b"); cmd.add("/proc");
-        cmd.add("-b"); cmd.add("/sys");
-        cmd.add("-b"); cmd.add("/dev");
         if (extraBind != null) {
             for (String b : extraBind) {
                 cmd.add("-b"); cmd.add(b);
             }
         }
-        cmd.add("-w"); cmd.add("/");
+        cmd.add("-w"); cmd.add("/root");
         cmd.add(detectShell(rootfs));
         cmd.add("-l");
         return cmd;

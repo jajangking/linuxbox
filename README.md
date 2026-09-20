@@ -158,6 +158,23 @@ Aturan pemilihan (`ProotSession.engineFor()`): sesi distro glibc memakai
 menyisipkan loader glibc-nya sendiri. Mesin yang terakhir dipakai dilaporkan di
 `/api/sessions` (field `engine`) dan di baris "[sesi baru dimulai: …]".
 
+Perbedaan command proroot yang penting (dua-duanya pernah bikin loop restart di
+perangkat):
+
+- **Bind wajib `host:guest`.** proroot menolak format tunggal dengan
+  `[proroot] bad bind format (expected host:guest): /proc`. Karena itu
+  `/sdcard` dikirim sebagai `-b /storage/emulated/0:/sdcard` untuk kedua mesin.
+- **`/proc`, `/sys`, `/dev` tidak di-bind manual** pada proroot: proroot
+  menyiapkannya sendiri, dan perintah contoh resminya pun tidak mem-bind-nya.
+  proot klasik tetap mem-bind ketiganya.
+- proroot memakai `-w /root` dan tidak punya `--kill-on-exit`.
+
+**Fallback otomatis:** kalau sesi mati <3 detik setelah start dua kali
+berturut-turut, sesi itu diturunkan ke proot klasik (`forcedEngine`) dan
+terminal mencetak "[proroot gagal dua kali, jatuh ke proot klasik untuk sesi
+ini]". Jadi proroot yang tidak cocok tidak pernah menjebakmu dalam loop
+restart.
+
 **Cara mengaktifkan mesin tambahan** (keduanya opsional; tanpa berkas ini aplikasi
 tetap jalan dengan proot klasik):
 
