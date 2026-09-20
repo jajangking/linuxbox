@@ -42,9 +42,23 @@ echo "[2b] jniLibs (lib/arm64-v8a, label apk_data_file_t -> boleh di-execve)"
 # ber-targetSdk>=30 (domain untrusted_app_32) TIDAK boleh execve file berlabel
 # app_data_file_t (filesDir). PackageManager mengekstrak lib/ ke nativeLibraryDir
 # berlabel apk_data_file_t yang DIIZINKAN di-execve.
-cp "$ASSETS/bin/proot" "$ASSETS/bin/ptylauncher" "$ASSETS/bin/libtalloc.so.2" \
-   "$ASSETS/bin/libandroid-shmem.so" "$WORK/jni/lib/arm64-v8a/"
+# Nama berawalan "lib" + ".so": paling aman untuk AGP (jalur Gradle) dan tetap
+# dikenali PackageManager di jalur aapt2 manual. ProotSession.pick() menerima
+# nama polos maupun nama lib*.so, jadi APK lama tidak rusak.
+stage_native() {  # stage_native <berkas-sumber> <nama-di-lib>
+    if [ ! -s "$1" ]; then
+        echo "GAGAL: $1 tidak ada/kosong." >&2
+        echo "  Di Termux jalankan: pkg install proot libtalloc libandroid-shmem" >&2
+        exit 1
+    fi
+    cp "$1" "$WORK/jni/lib/arm64-v8a/$2"
+}
+stage_native "$ASSETS/bin/proot"              libproot.so
+stage_native "$ASSETS/bin/ptylauncher"        libptylauncher.so
+stage_native "$ASSETS/bin/libtalloc.so.2"     libtalloc.so.2
+stage_native "$ASSETS/bin/libandroid-shmem.so" libandroid-shmem.so
 chmod 755 "$WORK"/jni/lib/arm64-v8a/*
+echo "  jniLibs: $(ls "$WORK/jni/lib/arm64-v8a" | tr '\n' ' ')"
 
 echo "[3] rootfs ($DISTRO)"
 if [ -d "$PREFIX/var/lib/proot-distro/containers/$DISTRO/rootfs" ]; then

@@ -12,3 +12,7 @@ android/app/src/main/assets/web/fit.js
 
 __pycache__/
 *.pyc
+
+# binary native hasil staging build (jangan masuk git)
+android/app/src/main/assets/bin/
+android/app/src/main/jniLibs/

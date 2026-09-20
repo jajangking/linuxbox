@@ -61,6 +61,43 @@ cd scripts && ./fetch-assets.sh        # jalankan di Termux (isilkan assets)
 > akan menawarkan regenerate wrapper saat dibuka ("Gradle wrapper missing").
 > Butuh NDK + CMake (Studio akan minta install saat pertama build).
 
+### Kenapa binary native harus di `lib/<abi>/` (jniLibs), bukan `filesDir`
+
+Sejak targetSdk 30, domain SELinux `untrusted_app_30/_32` **tidak boleh
+`execve()` berkas berlabel `app_data_file_t`** — yaitu semua yang ada di
+`filesDir`. Mencoba menjalankan proot/ptylauncher dari sana berujung
+`error=13 EPERM` (atau `Permission denied` tanpa keterangan).
+
+Karena itu binary di-stage ke dalam APK pada `lib/arm64-v8a/`:
+
+- **Jalur Gradle/Android Studio**: `scripts/fetch-assets.sh` menaruh
+  `libproot.so`, `libtalloc.so.2`, `libandroid-shmem.so` di
+  `app/src/main/jniLibs/arm64-v8a/`; `libptylauncher.so` datang dari CMake/NDK
+  (`CMakeLists.txt` sengaja `SHARED` supaya ikut ter-packaging meski ber-`main()`).
+- **Jalur `scripts/build-apk.sh`** (aapt2 manual): langkah `[2b]` men-stage
+  binary ke `$WORK/jni/lib/arm64-v8a/` dan langkah `[10]` menyuntikkannya ke APK
+  dengan `jar uf unsigned.apk lib` — **sebelum** penandatanganan di `[11]`.
+
+Saat instalasi, PackageManager mengekstrak `lib/<abi>/` ke `nativeLibraryDir`
+(`/data/app/<pkg>/lib/arm64`) dengan label `apk_data_file_t`, yang **boleh**
+di-`execve`. Kode Java mengambil path itu lewat
+`ProotSession.nativeLibraryDir(ctx)` dan memakainya juga untuk
+`LD_LIBRARY_PATH`. Kalau binary tidak ketemu di sana, `Bootstrap` gagal cepat
+dengan pesan yang menyuruh mem-build ulang dengan `lib/arm64-v8a/`.
+
+`ProotSession.pick()` menerima nama `libproot.so` maupun `proot`, jadi APK yang
+dibangun sebelum penamaan ini berlaku tetap bisa jalan.
+
+### Diagnostik helper (opsional)
+
+`ptylauncher` bisa menulis info cwd/`realpath`/`TMPDIR` ke terminal untuk
+menyelidiki kegagalan proot. Aktifkan dengan menaruh penanda, lalu start ulang
+server:
+
+```bash
+adb shell run-as com.linuxbox touch files/.debug   # hapus berkas ini untuk mematikan
+```
+
 ## Jalankan cepat (PoC tanpa build APK)
 
 Di Termux, validasi konsep langsung di HP:
@@ -109,7 +146,16 @@ Penyebab yang sudah pernah terjadi (dan sudah diperbaiki di kode ini):
    crash, atau gagal exec), server tetap hidup tapi terminal selamanya bisu.
    Sekarang ada supervisor: sesi di-restart dengan backoff 1,5s → 15s dan
    statusnya dikirim ke client.
-5. **Ukuran terminal tidak mengikuti window.** PTY dibuat dengan winsize bawaan
+5. **proot gagal dengan `Unable to create temp directory for f2fs bug probe`
+   atau `can't chdir(.../rootfs/./.)`.** proot membuat direktori sementara untuk
+   probe f2fs **sebelum** guest rootfs aktif, jadi `TMPDIR` harus berupa path
+   host yang benar-benar ada dan bisa ditulis — bukan `/tmp` (tidak ada di
+   Android). `ProotSession.environment()` kini memakai `filesDir/tmp` dan
+   membuatnya kalau perlu, serta selalu mengirim `--cwd=/` supaya proot tidak
+   perlu menebak guest-cwd (di sebagian ROM `realpath()` pada path data app
+   mengembalikan `/`).
+
+6. **Ukuran terminal tidak mengikuti window.** PTY dibuat dengan winsize bawaan
    kernel (0x0) sehingga `stty size` nol dan tampilan berantakan. Sekarang
    defaultnya 80x24, lalu klien mengirim `{"type":"resize","rows":N,"cols":M}`
    ke `/ctl` setiap kali window/xterm berubah ukuran; kalau sesi shell
@@ -117,7 +163,7 @@ Penyebab yang sudah pernah terjadi (dan sudah diperbaiki di kode ini):
    kanal kontrol (`files/ctrl.sock`) tidak bisa dibuka, terminal tetap jalan di
    80x24 — cek field `resize` di `/healthz`.
 
-6. **Aset `xterm.js` tidak ikut ter-bundle.** `assets/web/` di repo cuma berisi
+7. **Aset `xterm.js` tidak ikut ter-bundle.** `assets/web/` di repo cuma berisi
    `index.html`; kalau build Gradle dari clone bersih tanpa menjalankan
    `fetch-assets.sh`, halaman jadi hitam kosong tanpa pesan. Sekarang tugas
    Gradle `downloadWebAssets` mengunduh `xterm.js/xterm.css/fit.js` otomatis

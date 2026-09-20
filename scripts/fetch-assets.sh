@@ -20,6 +20,19 @@ cp "$PROOT_SRC" "$ASSETS/bin/proot"
 chmod 755 "$ASSETS/bin/proot"
 echo "  proot: $(file -b "$ASSETS/bin/proot" 2>/dev/null | cut -d, -f1) (sumber: $PROOT_SRC)"
 
+# Jalur Gradle wajib jniLibs: binary HARUS diekstrak PackageManager ke
+# nativeLibraryDir (label apk_data_file_t) supaya bisa di-execve — menyalin ke
+# filesDir (app_data_file_t) ditolak SELinux (EPERM). ptylauncher datang dari
+# CMake/NDK, jadi jangan diduplikasi di sini.
+JNILIBS="$SDIR/../android/app/src/main/jniLibs/arm64-v8a"
+mkdir -p "$JNILIBS"
+cp "$PROOT_SRC" "$JNILIBS/libproot.so"
+chmod 755 "$JNILIBS/libproot.so"
+for lib in "$PREFIX"/lib/libtalloc.so.2 "$PREFIX"/lib/libandroid-shmem.so; do
+    [ -e "$lib" ] && cp "$lib" "$JNILIBS/" && echo "  jniLibs: $(basename "$lib")"
+done
+echo "  jniLibs siap di $JNILIBS"
+
 echo "== 2. rootfs ($ROOTFS_DISTRO) =="
 ROOTFS_SRC="$PREFIX/var/lib/proot-distro/installed-rootfs/$ROOTFS_DISTRO"
 if [ ! -x "$ROOTFS_SRC/bin/sh" ]; then

@@ -57,6 +57,9 @@ public class PtyHelper {
         File ctrl = new File(filesDir, "ctrl.sock");
         java.util.Map<String, String> e = new java.util.HashMap<>(env);
         e.put(CTRL_ENV, ctrl.getAbsolutePath());
+        // Diagnostik ptylauncher hanya aktif kalau ada penanda files/.debug,
+        // supaya stderr helper tidak membanjiri terminal saat dipakai normal.
+        if (new File(filesDir, ".debug").isFile()) e.put("LINUXBOX_DEBUG", "1");
 
         java.util.List<String> argv = new java.util.ArrayList<>();
         argv.add(helper.getAbsolutePath());

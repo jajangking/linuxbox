@@ -4,7 +4,7 @@
     {
       "id": "alpine",
       "label": "Alpine 3.24 (minirootfs, ringan)",
-      "url": "https://dl-cdn.alpinelinux.org/alpine/latest-stable/releases/aarch64/alpine-minirootfs-3.24.2-aarch64.tar.gz",
+      "url": "",
       "sha256": "",
       "sizeBytes": 4194304
     },

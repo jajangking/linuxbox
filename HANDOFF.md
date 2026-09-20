@@ -93,3 +93,48 @@ adb shell "run-as com.linuxbox sh -c 'cd files/rootfs-alpine && LD_LIBRARY_PATH=
 1. Blocker proot runtime (usia: beberapa siklus).
 2. Hapus debug `ptylauncher.c`, commit fixes yang sudah terverifikasi, push ke `origin/arena/01a0ba70-linuxbox`.
 3. Drain `files/` bersih (`.part` dari ekstraksi lama) jika ragu.
+
+---
+
+## Update agent (setelah `16a967f`) — commit berikutnya
+
+Perbaikan lanjutan berbasis catatan di atas. Tidak ada perubahan pada pendekatan
+jniLibs (sudah terverifikasi di device), hanya konsistensi + dua hal yang
+menyasar blocker:
+
+1. **TMPDIR host-side** (`ProotSession.environment`) — dulu `/tmp` (path guest,
+   tidak ada di Android) => `Unable to create temp directory for f2fs bug probe`.
+   Sekarang `filesDir/tmp` (dibuat otomatis). Ini kemungkinan besar sumber
+   warning #1 dan #2.
+2. **`--cwd=/` eksplisit** di `buildCommand()` — proot tidak perlu menebak
+   guest-cwd dari `realpath(host cwd)`, yang di ROM ini mengembalikan `/`
+   (anomali yang kamu temukan). Menghilangkan
+   `can't chdir(".../rootfs-alpine/./.")` -> `execve("/bin/sh")`.
+3. **Penamaan native lib**: jniLibs sekarang `libproot.so` /
+   `libptylauncher.so` (aman untuk AGP); `ProotSession.pick()` menerima nama
+   `lib*.so` DAN nama polos, jadi APK lama tetap jalan.
+4. **Instrumentasi ptylauncher digate** di belakang `LINUXBOX_DEBUG`
+   (penanda `files/.debug`), path tidak lagi di-hardcode ke
+   `/data/data/com.linuxbox/...` — diambil dari cwd + `LINUXBOX_ROOTFS`.
+   Terminal bersih saat dipakai normal; nyalakan dengan:
+   `adb shell run-as com.linuxbox touch files/.debug`
+5. **Jalur Gradle ikut diperbaiki**: `fetch-assets.sh` sekarang men-stage
+   `libproot.so` + libtalloc + libandroid-shmem ke
+   `app/src/main/jniLibs/arm64-v8a/` (sebelumnya hanya ke `assets/bin/`, yang
+   sudah tidak dibaca app -> jalur Android Studio pasti gagal di
+   `bootstrapBinaries()`).
+6. `distros.json` alpine `url=""` (offline dari `assets/rootfs.tar.gz`),
+   konsisten dengan `DistroCatalog.BUILTIN`; Ubuntu tetap unduh dari CDN.
+
+### Ulangi di device setelah update ini
+```bash
+adb -s <dev> shell "am force-stop com.linuxbox"
+# (opsional) aktifkan diagnostik:
+adb -s <dev> shell run-as com.linuxbox touch files/.debug
+# start server, lalu lihat stderr proot via ws://127.0.0.1:8770/ws
+```
+Yang diharapkan hilang: warning `can't canonicalize .../com.termux/...tmp`,
+`Unable to create temp directory`, dan `can't chdir(.../rootfs/./.)`.
+Kalau `execve("/bin/sh")` masih gagal padahal `files/rootfs-alpine/bin/sh` ada,
+sisanya murni masalah resolusi path proot (lihat saran #1 di atas: bongkar
+`path/f2fs-bug.c` / inisialisasi cwd di proot Termux).

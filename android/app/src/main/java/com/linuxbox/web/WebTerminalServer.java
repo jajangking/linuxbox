@@ -143,7 +143,7 @@ public class WebTerminalServer {
         File rootfs = ProotSession.activeRootfsDir(ctx);
         PtyHelper p = PtyHelper.start(dir, nativeLibDir, rootfs,
                 ProotSession.buildCommand(nativeLibDir, rootfs),
-                ProotSession.environment(nativeLibDir, rootfs));
+                ProotSession.environment(dir, nativeLibDir, rootfs));
         lastError = null;
         return p;
     }
