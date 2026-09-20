@@ -279,7 +279,10 @@
   var sessions = [];          // daftar sesi dari server
   var ws = null, ctl = null;
   var retries = 0;
-  var reconnectTimer = null;
+  var reconnectTimer = null, reconnectCheckTimer = null, ctlReconnectTimer = null;
+  var connectionEpoch = 0;    // invalidasi callback/timer dari koneksi sesi lama
+  var sessionsRequest = 0;    // abaikan daftar sesi yang datang tidak berurutan
+  var terminalReady = true;  // false selama antrean output sesi lama sedang dikuras
   var serverUp = true;
   var fontSize = 14;
   var distros = [];
@@ -374,25 +377,27 @@
   }
 
   function refreshSessions() {
+    var request = ++sessionsRequest;
     return api('/api/sessions').then(function (data) {
+      if (request !== sessionsRequest) return null;
       sessions = data.sessions || [];
-      var had = sessionId;
+      serverUp = true;
       var exists = sessions.some(function (s) { return s.id === sessionId; });
-      if (!exists) sessionId = sessions.length ? sessions[0].id : null;
-      renderTabs();
+      var next = exists ? sessionId : (sessions.length ? sessions[0].id : null);
+      // Semua perubahan sesi aktif wajib melewati jalur yang menutup socket lama.
+      // Mengubah sessionId + reset saja meninggalkan ws OPEN milik sesi terhapus.
+      if (next !== sessionId) switchSession(next);
+      else renderTabs();
+      if (!next) { hideOverlay(); setState('tidak ada sesi', 'wait'); }
       infoEl.textContent = sessions.length + ' sesi · ' + fontSize + 'px';
-      // sesi aktif berubah (mis. sesi lama hilang setelah service restart)
-      if (sessionId !== had) {
-        finishSelection();
-        term.reset();
-        connect();
-      }
       return sessions;
     }).catch(function () {
-      serverUp = false;
-      setState('server tidak merespons', 'bad');
-      scheduleReconnect();
-      return [];
+      if (request !== sessionsRequest) return null;
+      // Kegagalan daftar sesi tidak berarti socket terminal ikut mati.
+      setState('gagal memperbarui daftar sesi', 'bad');
+      if (!ws || ws.readyState !== WebSocket.OPEN) scheduleReconnect();
+      // null = gagal/usang, bukan daftar kosong yang memicu pembuatan sesi baru.
+      return null;
     });
   }
 
@@ -440,10 +445,15 @@
 
   function killSession(id) {
     api('/api/sessions/' + id + '/kill', { method: 'POST' }).then(function () {
-      if (id === sessionId) { finishSelection(); term.reset(); sessionId = null; }
-      refreshSessions().then(function () {
-        if (!sessionId && sessions.length) switchSession(sessions[0].id);
-        else if (!sessions.length) newSession();
+      // Terapkan hasil POST dulu, jangan menunggu GET untuk melepas socket mati.
+      // Respons daftar yang dimulai sebelum POST selesai tidak boleh memulihkannya.
+      sessionsRequest++;
+      serverUp = true;
+      sessions = sessions.filter(function (s) { return s.id !== id; });
+      if (id === sessionId) switchSession(sessions.length ? sessions[0].id : null);
+      else renderTabs(); // menutup tab nonaktif tidak mereset terminal yang aktif
+      return refreshSessions().then(function (updated) {
+        if (updated && !updated.length && !sessionId) newSession();
       });
     }).catch(function (e) { setState('gagal tutup sesi: ' + e.message, 'bad'); });
   }
@@ -459,10 +469,20 @@
     if (id === sessionId) return;
     closeSockets();
     sessionId = id;
+    terminalReady = false;
+    var epoch = connectionEpoch;
     finishSelection();
-    term.reset();
     renderTabs();
-    connect();
+    hideOverlay();
+    setState(id ? 'menyambung…' : 'tidak ada sesi', 'wait');
+    // term.write diproses asinkron. Reset setelah output yang sudah mengantre
+    // selesai, sebelum membuka ws baru dan menerima replay riwayat sesi tujuan.
+    term.write('', function () {
+      if (epoch !== connectionEpoch) return;
+      term.reset();
+      terminalReady = true;
+      connect();
+    });
   }
 
   // ---------------------------------------------------------------- socket
@@ -500,6 +520,12 @@
   }
 
   function closeSockets() {
+    connectionEpoch++;
+    terminalReady = true;
+    clearTimeout(reconnectTimer); reconnectTimer = null;
+    clearTimeout(reconnectCheckTimer); reconnectCheckTimer = null;
+    clearTimeout(ctlReconnectTimer); ctlReconnectTimer = null;
+    retries = 0;
     // tandai dulu: onclose berjalan ASINKRON, jadi flag global tidak cukup
     if (ws) { ws.__byUser = true; try { ws.close(); } catch (e) {} ws = null; }
     if (ctl) { ctl.__byUser = true; try { ctl.close(); } catch (e) {} ctl = null; }
@@ -508,30 +534,41 @@
   function connectCtl() {
     if (!sessionId) return;
     if (ctl && (ctl.readyState === WebSocket.OPEN || ctl.readyState === WebSocket.CONNECTING)) return;
-    var sock = new WebSocket(wsUrl('/ctl', 'session=' + encodeURIComponent(sessionId)));
+    var owner = sessionId, epoch = connectionEpoch;
+    var sock = new WebSocket(wsUrl('/ctl', 'session=' + encodeURIComponent(owner)));
     ctl = sock;
-    sock.onopen = function () { sendSize(); };
+    function current() { return sock === ctl && owner === sessionId && epoch === connectionEpoch; }
+    sock.onopen = function () { if (current()) sendSize(); };
     sock.onmessage = function (e) {
+      if (!current()) return;
       var s = String(e.data || '');
       if (s.indexOf('need-size') >= 0) sendSize();
     };
     sock.onclose = function () {
-      if (sock === ctl) ctl = null;
-      if (sock.__byUser) return;
-      setTimeout(connectCtl, 3000);
+      if (!current() || sock.__byUser) return;
+      ctl = null;
+      ctlReconnectTimer = setTimeout(function () {
+        ctlReconnectTimer = null;
+        if (epoch === connectionEpoch && owner === sessionId) connectCtl();
+      }, 3000);
     };
     sock.onerror = function () {};
   }
 
   function connect() {
-    if (!sessionId || !serverUp) return;
+    if (!sessionId || !serverUp || !terminalReady) return;
     if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
 
-    var sock = new WebSocket(wsUrl('/ws', 'session=' + encodeURIComponent(sessionId)));
+    var owner = sessionId, epoch = connectionEpoch;
+    var sock = new WebSocket(wsUrl('/ws', 'session=' + encodeURIComponent(owner)));
     ws = sock;
     sock.binaryType = 'arraybuffer';  // server mengirim frame BINARY (byte PTY mentah)
+    function current() { return sock === ws && owner === sessionId && epoch === connectionEpoch; }
 
     sock.onopen = function () {
+      if (!current()) return;
+      clearTimeout(reconnectTimer); reconnectTimer = null;
+      clearTimeout(reconnectCheckTimer); reconnectCheckTimer = null;
       retries = 0;
       serverUp = true;
       hideOverlay();
@@ -540,22 +577,24 @@
       refreshSessions();
     };
 
-    ws.onmessage = function (e) {
+    sock.onmessage = function (e) {
+      if (!current()) return;
       if (typeof e.data === 'string') term.write(e.data);
       else term.write(new Uint8Array(e.data));
     };
 
     sock.onclose = function () {
-      if (sock === ws) ws = null;
-      if (sock.__byUser) return;   // kita yang menutupnya (ganti tab / tombol)
+      if (!current() || sock.__byUser) return;
+      ws = null;
       scheduleReconnect();
     };
 
-    sock.onerror = function () { setState('kesalahan koneksi', 'bad'); };
+    sock.onerror = function () { if (current()) setState('kesalahan koneksi', 'bad'); };
   }
 
   function scheduleReconnect() {
     if (reconnectTimer) return;
+    var epoch = connectionEpoch;
     retries++;
     var wait = Math.min(retries, 6) * 1000;
     if (retries === 1) {
@@ -566,11 +605,16 @@
                 'perintah yang sedang jalan di dalamnya tetap hidup.');
     reconnectTimer = setTimeout(function () {
       reconnectTimer = null;
+      if (epoch !== connectionEpoch) return;
       if (!sessionId) { refreshSessions(); return; }
       connect();
       //Kalau setelah 8 detik belum terbuka, anggap gagal dan coba lagi.
-      setTimeout(function () {
-        if (!ws || ws.readyState !== WebSocket.OPEN) scheduleReconnect();
+      var attemptedSocket = ws;
+      clearTimeout(reconnectCheckTimer);
+      reconnectCheckTimer = setTimeout(function () {
+        reconnectCheckTimer = null;
+        if (epoch === connectionEpoch && ws === attemptedSocket &&
+            (!ws || ws.readyState !== WebSocket.OPEN)) scheduleReconnect();
       }, 8000);
     }, wait);
   }
@@ -1061,7 +1105,6 @@
     return refreshSessions();
   }).then(function () {
     hideOverlay();
-    if (!sessionId && sessions.length) sessionId = sessions[0].id;
     connect();
   });
   setInterval(watchdog, 15000);

@@ -331,6 +331,11 @@ open(dst, "wb").write(AESGCM(key).decrypt(raw[20:32], raw[32:], None))
 
 - Tab sesi di bagian atas: `+ sesi baru` untuk menambah, `×` untuk menutup,
   klik dua kali untuk mengganti nama. Titik hijau = sesi hidup.
+  Menutup tab nonaktif tidak menghapus tampilan/koneksi tab aktif. Jika tab aktif
+  ditutup, terminal beralih ke sesi yang tersisa, menutup kedua socket lama,
+  lalu menyambung dan memuat ulang riwayat yang masih tersimpan di server.
+  Respons daftar sesi, output, dan timer koneksi lama yang terlambat diabaikan
+  agar tidak mengganggu sesi tujuan. Menutup tab terakhir membuat satu sesi baru.
 - Menyambung ulang otomatis dengan backoff saat koneksi putus (pesan
   "[sambungan putus, menyambung ulang…]"), dan mendeteksi server yang mati
   lewat `/healthz` lalu menyambung lagi begitu server kembali.
@@ -365,7 +370,7 @@ open(dst, "wb").write(AESGCM(key).decrypt(raw[20:32], raw[32:], None))
 - Indikator status di bawah: terhubung / menyambung ulang / server tidak
   merespons, plus jumlah sesi, distro, dan shell.
 
-### Pengujian seleksi dan tempel terminal
+### Pengujian sesi, seleksi, dan tempel terminal
 
 Pengujian browser memakai xterm 6 dan FitAddon asli, dengan backend PTY dan
 clipboard pengganti (tidak memerlukan Android SDK atau sesi Linux aktif):
@@ -387,6 +392,13 @@ baris/karakter kontrol, clipboard kosong/ditolak/tidak tersedia, fallback manual
 sesi berganti/koneksi putus saat menunggu clipboard, serta kanal WebView yang
 **dimock** (bukan pembacaan clipboard Android asli).
 
+Pengujian sesi memakai API dan event WebSocket terkontrol: menutup sesi kedua
+saat aktif/nonaktif, replay riwayat sesi pertama, pengiriman input ke sesi yang
+benar, sesi terhapus oleh klien lain, respons HTTP terlambat, output yang sudah
+mengantre, timer reconnect lama, penutupan tab terakhir, serta kegagalan refresh
+daftar sesi. Kasus sesi kedua ditutup dengan socket masih OPEN mereproduksi bug
+layar blank pada versi sebelum perbaikan.
+
 Tetap lakukan uji pada HP setelah rebuild APK dan muat ulang halaman terminal:
 1. Buka keyboard, tahan sebagian output, lalu tarik: keyboard menutup dan
    highlight beserta kedua marker tetap muncul setelah animasi selesai.
@@ -402,6 +414,11 @@ Tetap lakukan uji pada HP setelah rebuild APK dan muat ulang halaman terminal:
 6. Buka terminal melalui browser dengan akses clipboard ditolak/HTTP LAN:
    uji kolom tempel manual, kirim dan batalkan. Pastikan teks tidak dikirim ke
    terminal sebelum tombol **Tempel ke terminal** ditekan.
+7. Di sesi pertama jalankan `echo SESI_SATU`, catat `echo $$`, lalu buka sesi
+   kedua dan jalankan `echo SESI_DUA`. Tutup sesi kedua saat aktif: sesi pertama
+   harus menampilkan outputnya kembali, `echo $$` tetap sama, dan input bisa
+   dipakai tanpa perlu restart server. Ulangi menutup sesi kedua ketika sesi
+   pertama yang aktif; tampilan sesi pertama tidak boleh dikosongkan.
 
 Emulasi browser hanya memverifikasi fokus/input dan perubahan viewport, bukan
 IME/clipboard sistem Android yang sebenarnya.
