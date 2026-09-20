@@ -56,6 +56,17 @@
 
   /* ---- terminal ---- */
   #term { flex: 1 1 auto; min-height: 0; padding: 6px; }
+  #term .xterm-viewport {
+    height: 100% !important; overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  /* di layar sentuh, panning & seleksi native dimatikan; scroll ditangani JS */
+  html.touch #term .xterm-screen,
+  html.touch #term .xterm-rows,
+  html.touch #term textarea.xterm-helper-textarea {
+    touch-action: none; -webkit-user-select: none; user-select: none;
+    -webkit-touch-callout: none;
+  }
   #overlay {
     position: fixed; inset: 0; background: rgba(11, 14, 20, .82);
     display: none; align-items: center; justify-content: center; flex-direction: column;
@@ -508,7 +519,58 @@
     }
   });
 
-  // ---------- pencarian di terminal ----------
+  // ---------- gestur sentuh: scroll ----------
+  // Menggulir lewat touch: xterm 6 punya lapisan Gesture sendiri di document
+  // (preventDefault) yang justru mematikan scroll di WebView Android. Kita
+  // bekukan (stopPropagation di fase capture) lalu scroll manual via
+  // term.scrollLines. Tap tetap menghasilkan click -> keyboard terbuka seperti
+  // biasa; geser hanya menggulir (tanpa click/keyboard).
+  var LINE_H = 20;
+  function cellDims() {
+    try {
+      var scr = termEl.querySelector('.xterm-screen');
+      var r = scr.getBoundingClientRect();
+      if (r.width > 0 && r.height > 0 && term.rows > 0) {
+        LINE_H = r.height / term.rows;
+        return true;
+      }
+    } catch (e) {}
+    try { LINE_H = Math.ceil((term.options.fontSize || 14) * 1.35); } catch (e2) {}
+    return false;
+  }
+  if ('ontouchstart' in window) {
+    document.documentElement.classList.add('touch');
+    var gsY = 0, gsMoved = false;
+    var ges = termEl;
+    ges.addEventListener('touchstart', function (e) {
+      e.stopPropagation();
+      var t = e.touches[0];
+      gsY = t.clientY; gsMoved = false;
+    }, { capture: true, passive: true });
+    ges.addEventListener('touchmove', function (e) {
+      e.stopPropagation();
+      var t = e.touches[0];
+      var dy = t.clientY - gsY;
+      if (!gsMoved && Math.abs(dy) < 8) return;
+      gsMoved = true;
+      e.preventDefault();
+      cellDims();
+      var lines = Math.round(dy / LINE_H);
+      if (lines !== 0) {
+        term.scrollLines(-lines);
+        gsY = t.clientY;
+      }
+    }, { capture: true, passive: false });
+    ges.addEventListener('touchend', function (e) {
+      e.stopPropagation();
+      if (gsMoved) e.preventDefault();
+      gsMoved = false;
+    }, { capture: true, passive: false });
+    ges.addEventListener('touchcancel', function (e) { e.stopPropagation(); gsMoved = false; },
+        { capture: true, passive: false });
+  }
+
+// ---------- pencarian di terminal ----------
   var searchBar = document.getElementById('search');
   var searchInput = document.getElementById('searchInput');
   var searchCount = document.getElementById('searchCount');
