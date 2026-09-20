@@ -111,6 +111,12 @@ public final class ProotSession {
         cmd.add(prootBin(nativeLibDir).getAbsolutePath());
         cmd.add("--rootfs=" + rootfs.getAbsolutePath());
         cmd.add("--link2symlink");
+        // -0 / --root-id: di dalam guest tampil sebagai uid/gid 0. Tanpa ini
+        // guest memakai UID app host (mis. 10507) dan package manager seperti
+        // apk/apt menolak jalan ("must be run as root"), sementara HOME=/root
+        // yang kita set jadi tidak konsisten. Hak akses host tidak berubah:
+        // proot hanya memalsukan identitas di dalam guest.
+        cmd.add("-0");
         cmd.add("-b"); cmd.add("/proc");
         cmd.add("-b"); cmd.add("/sys");
         cmd.add("-b"); cmd.add("/dev");

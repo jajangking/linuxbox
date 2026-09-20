@@ -92,6 +92,14 @@ rootfs. Solusinya: salin loader itu ke `lib/arm64-v8a/` supaya berlabel
 - `ProotSession.environment()` → `PROOT_LOADER=<nativeLibraryDir>/libproot_loader.so`.
 - `Bootstrap` gagal cepat kalau loader tidak ada di `nativeLibraryDir`.
 
+### Identitas di dalam guest: `-0` (`--root-id`)
+
+`ProotSession.buildCommand()` selalu mengirim `-0`. Tanpa itu proot memakai UID
+app host di dalam guest (mis. `uid=10507`), sehingga `apk`/`apt` menolak jalan
+karena mengira bukan root dan `HOME=/root` jadi tidak konsisten. `-0` sama
+dengan `-i 0:0`: identitas **dipalsukan di dalam guest saja**, hak akses
+sebenarnya di host tetap UID aplikasi.
+
 ### Kenapa `targetSdk` dipatok 28
 
 Sejak Android 10, app dengan **targetSdk ≥ 29** (domain SELinux

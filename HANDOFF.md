@@ -89,6 +89,31 @@ adb shell "run-as com.linuxbox sh -c 'cd files/rootfs-alpine && LD_LIBRARY_PATH=
 2. Reproduksi `realpath()->/` anomali dalam satu binary kecil porter di app-domain (bukan mix business) — pastikan bukan artifact.
 3. Alternatif bypass proot: terminal langsung ke `busybox sh` (tanpa chroot) untuk UAT fungsional, lalu tangani proot terpisah.
 
+## SELESAI — update agent (commit `400efe0` + `-0`)
+
+Blocker proot RUNTIME TERATASI. Urutan akar masalah yang terbukti di device:
+
+1. `PROOT_TMP_DIR` (bukan `TMPDIR`) — `src/path/temp.c` memakai
+   `getenv("PROOT_TMP_DIR")` lalu `P_tmpdir` (isi Termux:
+   `/data/data/com.termux/files/usr/tmp`) -> warning canonicalize + f2fs probe.
+2. `--cwd=/` — proot menebak guest-cwd dari `realpath(host cwd)`.
+3. `targetSdk 28` — domain `untrusted_app_27`, supaya binary di `filesDir`
+   (`app_data_file`) boleh di-`execve` (aturan W^X Android 10+ untuk
+   `untrusted_app_29+`).
+4. **Loader proot (biang kerok EACCES)** — proot tidak pernah mengeksekusi
+   binary guest; `translate_execve_enter()` mengganti argumen execve dengan
+   path loader internal. proot Termux dikompilasi
+   `PROOT_UNBUNDLE_LOADER=/data/data/com.termux/files/usr/libexec/proot`, jadi
+   tanpa env `PROOT_LOADER` ia mengeksekusi direktori data app LAIN
+   (mode 0700) -> `EACCES`, dilaporkan sebagai `execve("/bin/sh"): Permission
+   denied` (tanpa `avc: denied`, karena ini kegagalan DAC).
+   Fix: loader ikut dibundel ke `lib/arm64-v8a/` sebagai `libproot_loader.so`
+   + `PROOT_LOADER=<nativeLibraryDir>/libproot_loader.so`.
+
+Hasil: `sessionAlive=true`, shell jalan, resize aktif, rootfs alpine offline OK.
+Catatan terakhar: guest sempat `uid=10507`; `-0` (`--root-id`) kini dikirim
+supaya `apk`/`apt` tidak menolak jalan karena bukan root.
+
 ## Level prioritas
 1. Blocker proot runtime (usia: beberapa siklus).
 2. Hapus debug `ptylauncher.c`, commit fixes yang sudah terverifikasi, push ke `origin/arena/01a0ba70-linuxbox`.
