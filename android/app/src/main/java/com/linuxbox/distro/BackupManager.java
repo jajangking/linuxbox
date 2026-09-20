@@ -15,7 +15,14 @@ import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Locale;
 
-/** Backup (ekspor) dan restore (impor) rootfs aktif dalam satu tap. */
+/**
+ * Backup (ekspor) dan restore (impor) rootfs aktif dalam satu tap.
+ *
+ * Backup bisa ditulis apa adanya (tar.gz) atau dienkripsi dengan passphrase
+ * (tar.gz + {@link Crypto#EXTENSION}). Versi terenkripsi aman disimpan di
+ * Download/Dropbox/dsb karena isinya tidak bisa dibuka tanpa passphrase, dan
+ * GCM sekaligus mendeteksi kalau berkasnya dimodifikasi.
+ */
 public final class BackupManager {
 
     private BackupManager() {}
@@ -27,6 +34,16 @@ public final class BackupManager {
      * @return berkas tar.gz di penyimpanan internal app
      */
     public static File exportRootfs(Context ctx, TaskLog log) throws IOException {
+        return exportRootfs(ctx, log, null);
+    }
+
+    /**
+     * @param passphrase null/kosong -> backup tar.gz biasa; selain itu berkas
+     *                   dienkripsi (AES-256-GCM) dan berakhiran .lbx
+     */
+    public static File exportRootfs(Context ctx, TaskLog log, char[] passphrase)
+            throws IOException {
+        boolean encrypt = passphrase != null && passphrase.length > 0;
         File rootfs = ProotSession.activeRootfsDir(ctx);
         if (!rootfs.isDirectory()) {
             throw new IOException("rootfs belum ada: " + rootfs.getAbsolutePath());
@@ -37,14 +54,34 @@ public final class BackupManager {
         if (!dir.isDirectory() && !dir.mkdirs()) {
             throw new IOException("tidak bisa membuat " + dir.getAbsolutePath());
         }
-        File out = new File(dir, "linuxbox-" + id + "-" + stamp + ".tar.gz");
+        String ext = encrypt ? ".tar.gz" + Crypto.EXTENSION : ".tar.gz";
+        File out = new File(dir, "linuxbox-" + id + "-" + stamp + ext);
+        // Tar ditulis ke berkas sementara dulu: kalau enkripsi gagal di tengah
+        // jalan, tidak ada tar.gz setengah jadi yang tertinggal di folder backup.
+        File plain = encrypt
+                ? new File(dir, ".tmp-" + stamp + "-" + System.currentTimeMillis() + ".tar.gz")
+                : out;
 
-        if (log != null) log.log("Membuat backup " + rootfs.getName() + "...");
+        if (log != null) {
+            log.log("Membuat backup " + rootfs.getName() + (encrypt ? " (terenkripsi)" : "") + "...");
+            if (encrypt) log.log("  " + Crypto.describe());
+        }
         long t0 = System.currentTimeMillis();
-        int entries = TarUtil.createTarGz(rootfs, out, log);
+        int entries = TarUtil.createTarGz(rootfs, plain, log);
         if (entries == 0) {
-            out.delete();
+            plain.delete();
             throw new IOException("rootfs kosong, backup dibatalkan");
+        }
+        boolean ok = false;
+        try {
+            if (encrypt) {
+                if (log != null) log.log("  mengenkripsi...");
+                Crypto.encrypt(plain, out, passphrase);
+            }
+            ok = true;
+        } finally {
+            if (encrypt) plain.delete();
+            if (!ok) out.delete();
         }
         String sha = Downloader.sha256(out);
         writeText(new File(out.getAbsolutePath() + ".sha256"), sha + "  " + out.getName() + "\n");
@@ -54,6 +91,10 @@ public final class BackupManager {
                     + ", " + ((System.currentTimeMillis() - t0) / 1000) + "s");
             log.log("  sha256: " + sha);
             log.log("  berkas: " + out.getAbsolutePath());
+        }
+        if (log != null && encrypt) {
+            log.log("  berkas terenkripsi: simpan baik-baik, tanpa passphrase "
+                    + "isi tidak bisa dipulihkan");
         }
         File published = publish(ctx, out, log);
         if (log != null && published != null) log.log("  disalin ke: " + published.getAbsolutePath());
@@ -65,9 +106,44 @@ public final class BackupManager {
      * dengan rootfs aktif (yang lama jadi .bak dan dihapus kalau sukses).
      */
     public static void importRootfs(Context ctx, File archive, TaskLog log) throws IOException {
+        importRootfs(ctx, archive, log, null);
+    }
+
+    /**
+     * @param passphrase wajib diisi kalau berkas backup terenkripsi; diabaikan
+     *                   (boleh null) untuk backup tar.gz biasa
+     */
+    public static void importRootfs(Context ctx, File archive, TaskLog log, char[] passphrase)
+            throws IOException {
         if (archive == null || !archive.isFile()) {
             throw new IOException("berkas backup tidak ditemukan");
         }
+        File filesDir = ctx.getFilesDir();
+        boolean encrypted = Crypto.isEncrypted(archive);
+        if (encrypted && (passphrase == null || passphrase.length == 0)) {
+            throw new IOException("backup ini terenkripsi — masukkan passphrase-nya");
+        }
+        File plain = archive;
+        File decrypted = null;
+        if (encrypted) {
+            if (log != null) log.log("Mendekripsi backup (" + Crypto.describe() + ")...");
+            decrypted = new File(filesDir,
+                    "restore-dec-" + System.currentTimeMillis() + ".tar.gz");
+            Crypto.decrypt(archive, decrypted, passphrase);
+            plain = decrypted;
+            if (log != null) {
+                log.log("  ok, " + Downloader.human(decrypted.length()) + " siap diekstrak");
+            }
+        }
+        try {
+            importPlain(ctx, plain, log);
+        } finally {
+            if (decrypted != null) decrypted.delete();
+        }
+    }
+
+    /** Ekstrak tar.gz (sudah dalam keadaan polos) ke rootfs aktif. */
+    private static void importPlain(Context ctx, File archive, TaskLog log) throws IOException {
         File filesDir = ctx.getFilesDir();
         File active = ProotSession.activeRootfsDir(ctx);
         File tmp = new File(filesDir, "rootfs-import-" + System.currentTimeMillis());
@@ -108,7 +184,9 @@ public final class BackupManager {
             if (Build.VERSION.SDK_INT >= 29) {
                 ContentValues cv = new ContentValues();
                 cv.put(MediaStore.Downloads.DISPLAY_NAME, src.getName());
-                cv.put(MediaStore.Downloads.MIME_TYPE, "application/gzip");
+                cv.put(MediaStore.Downloads.MIME_TYPE,
+                        src.getName().endsWith(Crypto.EXTENSION)
+                                ? "application/octet-stream" : "application/gzip");
                 cv.put(MediaStore.Downloads.IS_PENDING, 1);
                 android.net.Uri uri = ctx.getContentResolver()
                         .insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, cv);

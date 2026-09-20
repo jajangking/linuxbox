@@ -111,21 +111,40 @@ public class Bootstrap {
         File filesDir = ctx.getFilesDir();
         if (d.url != null && !d.url.isEmpty()) {
             File out = new File(filesDir, "rootfs-" + d.id + ".tar.gz");
+            // Arsip dari percobaan sebelumnya hanya dipakai kalau hash-nya masih
+            // cocok: berkas yang setengah rusak (atau ketimpa versi lain) tidak
+            // boleh langsung diekstrak.
+            if (out.isFile()) {
+                if (Downloader.matches(out, d.sha256)) {
+                    log.log("Memakai arsip yang sudah ada: " + out.getName()
+                            + " (" + Downloader.human(out.length()) + ")");
+                    return out;
+                }
+                log.log("Arsip lama tidak cocok dengan sha256, dihapus & diunduh ulang.");
+                out.delete();
+            }
             Downloader.download(d.url, out, d.sizeBytes, d.sha256, log);
+            if (!Downloader.matches(out, d.sha256)) {
+                // Seharusnya tidak pernah terjadi: Downloader sudah memverifikasi.
+                out.delete();
+                throw new IOException("arsip hasil unduhan tidak lolos verifikasi sha256");
+            }
             return out;
         }
         // fallback: arsip yang dibundel di assets
         File tarGz = new File(filesDir, "rootfs.tar.gz");
-        if (!tarGz.isFile()) {
-            log.log("Menyalin rootfs.tar.gz dari assets...");
-            copyAsset("rootfs.tar.gz", tarGz);
+        if (tarGz.isFile() && !hashFromBootstrapJson().isEmpty()
+                && Downloader.matches(tarGz, hashFromBootstrapJson())) {
+            log.log("Memakai rootfs.tar.gz yang sudah ada (sha256 ok).");
+            return tarGz;
         }
-        String expect = "";
-        try {
-            JSONObject json = new JSONObject(readAsset("bootstrap.json"));
-            expect = json.getJSONObject("rootfs").optString("sha256", "");
-        } catch (Exception ignored) {
+        if (tarGz.isFile()) {
+            log.log("rootfs.tar.gz lama tidak cocok dengan sha256, disalin ulang dari assets.");
+            tarGz.delete();
         }
+        log.log("Menyalin rootfs.tar.gz dari assets...");
+        copyAsset("rootfs.tar.gz", tarGz);
+        String expect = hashFromBootstrapJson();
         if (!expect.isEmpty()) {
             String got = Downloader.sha256(tarGz);
             if (!expect.equalsIgnoreCase(got)) {
@@ -134,6 +153,16 @@ public class Bootstrap {
             log.log("  sha256 ok");
         }
         return tarGz;
+    }
+
+    /** sha256 arsip bawaan assets (diisi fetch-assets.sh ke bootstrap.json). */
+    private String hashFromBootstrapJson() {
+        try {
+            JSONObject json = new JSONObject(readAsset("bootstrap.json"));
+            return json.getJSONObject("rootfs").optString("sha256", "");
+        } catch (Exception ignored) {
+            return "";
+        }
     }
 
     private String readAsset(String name) throws Exception {

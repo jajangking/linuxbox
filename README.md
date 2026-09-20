@@ -174,6 +174,59 @@ unzip -p termux-app.apk lib/arm64-v8a/libbusybox.so \
   > android/app/src/main/jniLibs/arm64-v8a/libbusybox.so
 ```
 
+### Unduhan tahan putus + verifikasi SHA-256
+
+- **`distros.json` kini berisi SHA-256 asli** dari upstream (Alpine memakai
+  berkas `.sha256` resminya, Ubuntu memakai `SHA256SUMS`), jadi verifikasi
+  jalan sungguhan, bukan cuma dicatat di log. Nilai yang dipakai saat ini:
+  | distro | berkas | sha256 |
+  |---|---|---|
+  | alpine | `alpine-minirootfs-3.24.2-aarch64.tar.gz` | `9bf70a7f…2ce773` |
+  | ubuntu-2404 | `ubuntu-base-24.04.5-base-arm64.tar.gz` | `a91d5a93…f05914f2` |
+  | ubuntu-2604 | `ubuntu-base-26.04.1-base-arm64.tar.gz` | `5a190679…c5b219fd` |
+- **Lanjutkan unduhan yang putus** lewat header `Range: bytes=<pos>-`: sisa
+  berkas disimpan sebagai `.part` dan dipakai lagi pada percobaan berikutnya,
+  dengan jeda mengembang 1s→2s→4s…30s (maksimal 6 percobaan). Kalau server
+  tidak mendukung `Range` (balas 200, bukan 206), berkas diulang dari awal.
+  HTTP 4xx tidak dicoba ulang — URL salah langsung gagal, tidak menunggu 31 s.
+- Ukuran akhir selalu diambil dari header (`Content-Range`/`Content-Length`),
+  **bukan** dari `sizeBytes` di katalog (itu cuma tebakan untuk progress bar).
+- Arsip lama di `files/rootfs-<id>.tar.gz` dicek hash-nya sebelum dipakai:
+  kalau tidak cocok, dihapus dan diunduh ulang — rootfs yang setengah rusak
+  tidak pernah sampai ke tahap ekstraksi.
+
+### Backup terenkripsi (passphrase)
+
+Tombol *Backup* menanyakan passphrase. Kosongkan → `tar.gz` biasa seperti
+sebelumnya; diisi → berkas `…tar.gz.lbx` terenkripsi.
+
+```
+"LBX1" 4B | salt 16B (acak) | nonce 12B (acak) | cipherteks + tag GCM 16B
+AES-256-GCM, kunci = PBKDF2-HMAC-SHA256(passphrase, salt, 210.000 iterasi)
+```
+
+GCM dipilih karena sekaligus menjaga keutuhan: passphrase salah atau berkas
+dimodifikasi → pesan "passphrase salah atau berkas backup rusak", bukan rootfs
+acak yang separuh rusak. *Restore* mendeteksi format dari 4 byte pertama, jadi
+berkas `.lbx` maupun `.tar.gz` sama-sama bisa dipilih.
+
+Butuh membuka backup di komputer? Formatnya sengaja sederhana:
+
+```python
+# pip install cryptography
+import sys
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+from cryptography.hazmat.primitives import hashes
+
+src, dst, pw = sys.argv[1], sys.argv[2], sys.argv[3].encode()
+raw = open(src, "rb").read()
+assert raw[:4] == b"LBX1", "bukan backup linuxbox"
+key = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32,
+                 salt=raw[4:20], iterations=210_000).derive(pw)
+open(dst, "wb").write(AESGCM(key).decrypt(raw[20:32], raw[32:], None))
+```
+
 ### Endpoint API
 
 | Endpoint | Kegunaan |
@@ -384,9 +437,9 @@ memasang distro dengan versi sebelumnya, jalankan **'Pasang distro'** sekali lag
 - [x] Distro per sesi + bind `/sdcard` (izin runtime)
 - [x] Pencarian terminal (Ctrl-F) + tautan web bisa diklik
 - [x] Mesin pluggable: shell native (bionic) / proot / proroot
-- [ ] Verifikasi tanda tangan (SHA-256) unduhan distro saat bootstrap
-- [ ] Lanjutkan unduhan distro yang putus lewat HTTP Range
-- [ ] Enkripsi backup rootfs (passphrase)
+- [x] Verifikasi SHA-256 unduhan distro (hash asli upstream, dicek juga untuk arsip lama)
+- [x] Lanjutkan unduhan yang putus lewat HTTP Range + retry berjeda
+- [x] Enkripsi backup rootfs dengan passphrase (AES-256-GCM + PBKDF2)
 - [ ] Verifikasi tanda tangan (GPG/SHA256SUMS) saat mengunduh distro
 - [ ] Lanjutkan unduhan yang terputus (HTTP Range)
 - [ ] Enkripsi backup rootfs

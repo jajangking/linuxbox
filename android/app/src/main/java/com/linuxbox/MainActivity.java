@@ -29,6 +29,7 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import com.linuxbox.distro.BackupManager;
+import com.linuxbox.distro.Crypto;
 import com.linuxbox.distro.Bootstrap;
 import com.linuxbox.distro.DistroCatalog;
 import com.linuxbox.distro.ProotSession;
@@ -441,24 +442,105 @@ public class MainActivity extends Activity {
         Toast.makeText(this, "URL disalin", Toast.LENGTH_SHORT).show();
     }
 
+    /** Backup: tanpa passphrase = tar.gz biasa, dengan passphrase = .lbx (AES-GCM). */
     private void backup() {
-        append("-- backup rootfs");
+        EditText input = new EditText(this);
+        input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        input.setHint("passphrase (kosongkan = tanpa enkripsi)");
+        new android.app.AlertDialog.Builder(this)
+                .setTitle("Backup rootfs")
+                .setMessage("Isi passphrase untuk mengenkripsi backup "
+                        + "(AES-256-GCM). Kosongkan untuk backup tar.gz biasa. "
+                        + "Simpan passphrase baik-baik: tanpa itu isi tidak bisa dipulihkan.")
+                .setView(input)
+                .setNegativeButton("Batal", null)
+                .setPositiveButton("Backup", (d, w) -> {
+                    char[] pass = passphraseOf(input);
+                    append("-- backup rootfs" + (pass.length > 0 ? " (terenkripsi)" : ""));
+                    busy(() -> {
+                        try {
+                            File out = BackupManager.exportRootfs(this, this::append,
+                                    pass.length > 0 ? pass : null);
+                            append("-- backup selesai: " + out.getName());
+                        } catch (Throwable t) {
+                            append("!! GAGAL: " + t.getMessage());
+                            t.printStackTrace();
+                        } finally {
+                            Crypto.wipe(pass);
+                        }
+                    });
+                })
+                .show();
+    }
+
+    /** Ambil passphrase dari kotak teks (tanpa dipangkas: spasi boleh berarti). */
+    private static char[] passphraseOf(EditText input) {
+        String s = input.getText() == null ? "" : input.getText().toString();
+        return s.isEmpty() ? new char[0] : s.toCharArray();
+    }
+
+    /** Salin isi URI ke berkas sementara (cache), kembalikan ukurannya. */
+    private long copyUriToFile(android.net.Uri uri, File dst) throws java.io.IOException {
+        InputStream in = getContentResolver().openInputStream(uri);
+        if (in == null) throw new java.io.IOException("berkas tidak bisa dibuka");
+        FileOutputStream out = new FileOutputStream(dst);
+        byte[] buf = new byte[1 << 16];
+        int n;
+        long total = 0;
+        while ((n = in.read(buf)) > 0) {
+            out.write(buf, 0, n);
+            total += n;
+        }
+        out.close();
+        in.close();
+        return total;
+    }
+
+    /** Jalankan pemulihan dari berkas (polos atau terenkripsi) di thread latar. */
+    private void restoreFrom(File file, char[] passphrase) {
+        append("-- restore dari " + file.getName()
+                + (passphrase != null && passphrase.length > 0 ? " (terenkripsi)" : ""));
         busy(() -> {
             try {
-                File out = BackupManager.exportRootfs(this, this::append);
-                append("-- backup selesai: " + out.getName());
+                BackupManager.importRootfs(MainActivity.this, file,
+                        MainActivity.this::append, passphrase);
+                append("-- selesai. Start ulang server untuk memakai rootfs baru.");
             } catch (Throwable t) {
                 append("!! GAGAL: " + t.getMessage());
                 t.printStackTrace();
+            } finally {
+                Crypto.wipe(passphrase);
+                file.delete();
             }
         });
+    }
+
+    /** Minta passphrase untuk backup .lbx, lalu pulihkan. */
+    private void askPassphraseRestore(File file) {
+        EditText input = new EditText(this);
+        input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        input.setHint("passphrase backup");
+        new android.app.AlertDialog.Builder(this)
+                .setTitle("Backup terenkripsi")
+                .setMessage("Berkas ini dienkripsi (" + Crypto.describe()
+                        + "). Masukkan passphrase-nya.")
+                .setView(input)
+                .setCancelable(false)
+                .setNegativeButton("Batal", (d, w) -> file.delete())
+                .setPositiveButton("Pulihkan", (d, w) -> {
+                    char[] pass = passphraseOf(input);
+                    restoreFrom(file, pass.length > 0 ? pass : null);
+                })
+                .show();
     }
 
     private void pickBackup() {
         try {
             Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
             i.addCategory(Intent.CATEGORY_OPENABLE);
-            i.setType("application/gzip");
+            // "*/*" supaya backup terenkripsi (.lbx) juga bisa dipilih;
+            // deteksi formatnya dilakukan dari 4 byte pertama berkas.
+            i.setType("*/*");
             i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
             startActivityForResult(Intent.createChooser(i, "Pilih berkas backup"), REQ_RESTORE);
         } catch (Exception e) {
@@ -474,28 +556,28 @@ public class MainActivity extends Activity {
             android.net.Uri uri = data.getData();
             append("-- restore dari " + uri.getLastPathSegment());
             busy(() -> {
-                File tmp = new File(getCacheDir(), "restore-" + System.currentTimeMillis() + ".tar.gz");
+                File tmp = new File(getCacheDir(),
+                        "restore-" + System.currentTimeMillis() + ".bin");
+                boolean handedOff = false;
                 try {
-                    InputStream in = getContentResolver().openInputStream(uri);
-                    if (in == null) throw new java.io.IOException("berkas tidak bisa dibuka");
-                    FileOutputStream out = new FileOutputStream(tmp);
-                    byte[] buf = new byte[1 << 16];
-                    int n;
-                    long total = 0;
-                    while ((n = in.read(buf)) > 0) {
-                        out.write(buf, 0, n);
-                        total += n;
-                    }
-                    out.close();
-                    in.close();
+                    long total = copyUriToFile(uri, tmp);
                     append("  disalin " + (total / (1024 * 1024)) + " MB");
-                    BackupManager.importRootfs(MainActivity.this, tmp, MainActivity.this::append);
-                    append("-- selesai. Start ulang server untuk memakai rootfs baru.");
+                    if (Crypto.isEncrypted(tmp)) {
+                        // Butuh passphrase: serahkan ke dialog di thread UI.
+                        // Berkas sengaja tidak dihapus di sini.
+                        handedOff = true;
+                        runOnUiThread(() -> askPassphraseRestore(tmp));
+                        return;
+                    }
+                    handedOff = true;
+                    // restoreFrom() menyentuh tombol lewat busy(), jadi harus
+                    // dijalankan dari thread UI, bukan dari thread ini.
+                    runOnUiThread(() -> restoreFrom(tmp, null));
                 } catch (Throwable t) {
                     append("!! GAGAL: " + t.getMessage());
                     t.printStackTrace();
                 } finally {
-                    tmp.delete();
+                    if (!handedOff) tmp.delete();
                 }
             });
         }
