@@ -50,11 +50,15 @@ dependencies {
 // kalau sedang offline, jalankan scripts/fetch-assets.sh (butuh curl).
 val xtermVersion = "6.0.0"
 val fitAddonVersion = "0.11.0"
+val searchAddonVersion = "0.16.0"
+val webLinksAddonVersion = "0.12.0"
 val webAssetsDir = layout.projectDirectory.dir("src/main/assets/web")
 val webAssets = listOf(
     "xterm.js" to "https://cdn.jsdelivr.net/npm/@xterm/xterm@$xtermVersion/lib/xterm.js",
     "xterm.css" to "https://cdn.jsdelivr.net/npm/@xterm/xterm@$xtermVersion/css/xterm.css",
-    "fit.js" to "https://cdn.jsdelivr.net/npm/@xterm/addon-fit@$fitAddonVersion/lib/addon-fit.js"
+    "fit.js" to "https://cdn.jsdelivr.net/npm/@xterm/addon-fit@$fitAddonVersion/lib/addon-fit.js",
+    "search.js" to "https://cdn.jsdelivr.net/npm/@xterm/addon-search@$searchAddonVersion/lib/addon-search.js",
+    "weblinks.js" to "https://cdn.jsdelivr.net/npm/@xterm/addon-web-links@$webLinksAddonVersion/lib/addon-web-links.js"
 )
 
 val downloadWebAssets = tasks.register("downloadWebAssets") {
@@ -62,6 +66,8 @@ val downloadWebAssets = tasks.register("downloadWebAssets") {
     val assets = webAssets
     inputs.property("xtermVersion", xtermVersion)
     inputs.property("fitAddonVersion", fitAddonVersion)
+    inputs.property("searchAddonVersion", searchAddonVersion)
+    inputs.property("webLinksAddonVersion", webLinksAddonVersion)
     outputs.files(assets.map { (name, _) -> targetDir.file(name) })
     doLast {
         assets.forEach { (name, url) ->

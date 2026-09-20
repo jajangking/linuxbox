@@ -90,6 +90,21 @@
     color: var(--fg); border: 1px solid var(--line); border-radius: 5px;
     font: 12px monospace; cursor: pointer;
   }
+  #search {
+    flex: 0 0 auto; display: none; align-items: center; gap: 6px;
+    padding: 6px 8px; background: var(--bar); border-bottom: 1px solid var(--line);
+  }
+  #search.show { display: flex; }
+  #search input {
+    flex: 1 1 auto; min-width: 80px; background: #0b0e14; color: var(--fg);
+    border: 1px solid var(--line); border-radius: 5px; padding: 5px 8px;
+    font: 12px monospace;
+  }
+  #searchCount { color: var(--dim); font: 11px monospace; min-width: 62px; text-align: center; }
+  #distroSel {
+    background: #1b2230; color: var(--fg); border: 1px solid var(--line);
+    border-radius: 5px; padding: 5px 6px; font-size: 12px; max-width: 150px;
+  }
   #fatal {
     display: none; color: var(--bad); font: 13px/1.6 monospace;
     padding: 16px; white-space: pre-wrap;
@@ -102,12 +117,21 @@
   <div id="tabs"></div>
   <div id="actions">
     <button class="act" id="btnNew">+ Sesi</button>
+    <select id="distroSel" title="Distro untuk sesi baru"></select>
     <button class="act" id="btnClear">Bersihkan</button>
+    <button class="act" id="btnSearch">Cari</button>
     <button class="act" id="btnFontOut">A−</button>
     <button class="act" id="btnFontIn">A+</button>
     <button class="act" id="btnReconnect">Sambung ulang</button>
     <span id="spacer"></span>
     <button class="act" id="btnHelp">?</button>
+  </div>
+  <div id="search">
+    <input id="searchInput" type="text" placeholder="cari di terminal…" autocomplete="off">
+    <button class="act" id="searchPrev">‹</button>
+    <button class="act" id="searchNext">›</button>
+    <span id="searchCount"></span>
+    <button class="act" id="searchClose">×</button>
   </div>
   <div id="term"></div>
   <div id="keys">
@@ -133,6 +157,8 @@
 
 <script src="xterm.js"></script>
 <script src="fit.js"></script>
+<script src="search.js"></script>
+<script src="weblinks.js"></script>
 <script>
 (function () {
   'use strict';
@@ -167,6 +193,8 @@
   var reconnectTimer = null;
   var serverUp = true;
   var fontSize = 14;
+  var distros = [];
+  var storageOk = false;
 
   var term = new Terminal({
     cursorBlink: true, fontFamily: 'monospace', fontSize: fontSize,
@@ -179,6 +207,17 @@
   if (typeof FitAddon !== 'undefined' && FitAddon.FitAddon) {
     fit = new FitAddon.FitAddon();
     term.loadAddon(fit);
+  }
+
+  // pencarian (Ctrl-F) — addon opsional, terminal tetap jalan tanpanya
+  var searchAddon = null;
+  if (typeof SearchAddon !== 'undefined' && SearchAddon.SearchAddon) {
+    searchAddon = new SearchAddon.SearchAddon();
+    term.loadAddon(searchAddon);
+  }
+  // tautan http(s) di dalam terminal bisa diklik
+  if (typeof WebLinksAddon !== 'undefined' && WebLinksAddon.WebLinksAddon) {
+    term.loadAddon(new WebLinksAddon.WebLinksAddon());
   }
 
   // ---------------------------------------------------------------- util
@@ -214,6 +253,22 @@
     });
   }
 
+  function refreshDistros() {
+    return api('/api/distros').then(function (d) {
+      distros = (d.distros || []).filter(function (x) { return x.installed; });
+      var sel = document.getElementById('distroSel');
+      var prev = sel.value;
+      sel.innerHTML = '';
+      distros.forEach(function (x) {
+        var o = document.createElement('option');
+        o.value = x.id; o.textContent = x.label || x.id;
+        sel.appendChild(o);
+      });
+      if (prev) sel.value = prev;
+      if (distros.length <= 1) sel.style.display = 'none';
+    }).catch(function () {});
+  }
+
   function refreshSessions() {
     return api('/api/sessions').then(function (data) {
       sessions = data.sessions || [];
@@ -241,7 +296,7 @@
     sessions.forEach(function (s) {
       var el = document.createElement('div');
       el.className = 'tab' + (s.id === sessionId ? ' active ' : ' ') + (s.alive ? 'alive' : 'dead');
-      el.title = s.name + ' (klik 2x untuk ganti nama)';
+      el.title = s.name + ' · ' + (s.distro || '?') + ' (klik 2x untuk ganti nama)';
       var dot = document.createElement('span');
       dot.className = 'dot';
       var label = document.createElement('span');
@@ -266,7 +321,9 @@
   }
 
   function newSession() {
-    api('/api/sessions', { method: 'POST' }).then(function (data) {
+    var sel = document.getElementById('distroSel');
+    var extra = (sel && sel.value) ? ('?distro=' + encodeURIComponent(sel.value)) : '';
+    api('/api/sessions' + extra, { method: 'POST' }).then(function (data) {
       if (data.error) { setState(data.error, 'bad'); return; }
       return refreshSessions().then(function () { switchSession(data.id); });
     }).catch(function (e) { setState('gagal buat sesi: ' + e.message, 'bad'); });
@@ -403,8 +460,10 @@
         setState('server kembali', 'ok');
         refreshSessions().then(function () { connect(); });
       } else {
+        storageOk = !!st.storage;
         infoEl.textContent = (st.sessions || 0) + '/' + (st.sessionsAlive || 0) +
-            ' sesi hidup · ' + (st.distro || '?') + ' · ' + (st.shell || '?') + ' · ' + fontSize + 'px';
+            ' sesi hidup · ' + (st.distro || '?') + ' · ' + (st.shell || '?') +
+            ' · ' + (storageOk ? 'sdcard ✓' : 'sdcard ✗') + ' · ' + fontSize + 'px';
         if (!ws || ws.readyState !== WebSocket.OPEN) connect();
       }
     }).catch(function () {
@@ -434,6 +493,47 @@
     }
   });
 
+  // ---------- pencarian di terminal ----------
+  var searchBar = document.getElementById('search');
+  var searchInput = document.getElementById('searchInput');
+  var searchCount = document.getElementById('searchCount');
+
+  function updateSearchCount(found) {
+    searchCount.textContent = found ? 'ada' : (searchInput.value ? 'tidak ada' : '');
+  }
+  function findNext(back) {
+    if (!searchAddon || !searchInput.value) return;
+    if (back) searchAddon.findPrevious(searchInput.value);
+    else searchAddon.findNext(searchInput.value);
+  }
+  function toggleSearch(show) {
+    var willShow = (typeof show === 'boolean') ? show : !searchBar.classList.contains('show');
+    if (willShow) {
+      searchBar.classList.add('show');
+      searchInput.focus();
+      searchInput.select();
+    } else {
+      searchBar.classList.remove('show');
+      searchCount.textContent = '';
+      term.focus();
+    }
+  }
+  searchInput.addEventListener('input', function () { findNext(false); });
+  searchInput.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') { e.preventDefault(); findNext(e.shiftKey); }
+    else if (e.key === 'Escape') { e.preventDefault(); toggleSearch(false); }
+  });
+  document.getElementById('searchNext').addEventListener('click', function () { findNext(false); });
+  document.getElementById('searchPrev').addEventListener('click', function () { findNext(true); });
+  document.getElementById('searchClose').addEventListener('click', function () { toggleSearch(false); });
+  document.getElementById('btnSearch').addEventListener('click', function () { toggleSearch(); });
+  document.addEventListener('keydown', function (e) {
+    if ((e.ctrlKey || e.metaKey) && (e.key === 'f' || e.key === 'F')) {
+      e.preventDefault();
+      toggleSearch(true);
+    }
+  });
+
   document.getElementById('btnNew').addEventListener('click', newSession);
   document.getElementById('btnClear').addEventListener('click', function () { term.clear(); });
   document.getElementById('btnReconnect').addEventListener('click', function () {
@@ -454,7 +554,11 @@
       '  walau browser ditutup atau koneksi putus.\n' +
       '• + Sesi untuk menambah, × pada tab untuk menutup, klik 2x untuk ganti nama.\n' +
       '• Kalau shell keluar (exit/crash), sesi otomatis hidup lagi.\n' +
-      '• A+/A− mengubah ukuran huruf, Bersihkan mengosongkan layar saja.');
+      '• A+/A− mengubah ukuran huruf, Bersihkan mengosongkan layar saja.\n' +
+      '• Cari (Ctrl-F) untuk mencari di scrollback; tautan bisa diklik.\n' +
+      '• Pilihan distro di sebelah "+ Sesi" menentukan distro sesi baru,\n' +
+      '  jadi satu tab bisa alpine dan tab lain ubuntu.\n' +
+      '• status "sdcard ✓" berarti /sdcard di-bind ke dalam guest.');
   });
   Array.prototype.forEach.call(document.querySelectorAll('#keys button'), function (b) {
     b.addEventListener('click', function () {
@@ -467,7 +571,9 @@
   // ---------------------------------------------------------------- start
   setState('menyambung…', 'wait');
   showOverlay('Menyambung…', '');
-  refreshSessions().then(function () {
+  refreshDistros().then(function () {
+    return refreshSessions();
+  }).then(function () {
     hideOverlay();
     if (!sessionId && sessions.length) sessionId = sessions[0].id;
     connect();

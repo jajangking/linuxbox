@@ -2,6 +2,7 @@ package com.linuxbox.web;
 
 import android.content.Context;
 
+import com.linuxbox.distro.DistroCatalog;
 import com.linuxbox.distro.ProotSession;
 import com.linuxbox.distro.PtyHelper;
 
@@ -56,6 +57,8 @@ public final class SessionManager {
     /** Satu tab terminal: proses PTY + scrollback + siapa saja yang menonton. */
     public static final class Session {
         public final String id;
+        /** Distro yang dipakai sesi ini; tiap sesi boleh beda (tab alpine + tab ubuntu). */
+        public final String distroId;
         public final long createdAt;
         public volatile String name;
         public volatile int rows = 24;
@@ -72,9 +75,10 @@ public final class SessionManager {
         /** true kalau ada output baru yang belum ditulis ke disk. */
         volatile boolean scrollDirty;
 
-        Session(String id, String name, long createdAt) {
+        Session(String id, String name, String distroId, long createdAt) {
             this.id = id;
             this.name = name;
+            this.distroId = distroId;
             this.createdAt = createdAt;
         }
 
@@ -144,7 +148,13 @@ public final class SessionManager {
                         if (id == null || id.isEmpty()) continue;
                         String name = sanitize(jsonString(obj, "name"), "shell");
                         long created = jsonLong(obj, "created");
-                        Session s = new Session(id, name, created > 0 ? created : System.currentTimeMillis());
+                        String distro = jsonString(obj, "distro");
+                        if (distro == null || distro.isEmpty()
+                                || !DistroCatalog.isInstalled(this.ctx, distro)) {
+                            distro = DistroCatalog.activeId(this.ctx);
+                        }
+                        Session s = new Session(id, name, distro,
+                                created > 0 ? created : System.currentTimeMillis());
                         int rows = (int) jsonLong(obj, "rows");
                         int cols = (int) jsonLong(obj, "cols");
                         if (rows > 0) s.rows = rows;
@@ -167,14 +177,28 @@ public final class SessionManager {
     }
 
     public Session create(String name) throws IOException {
+        return create(name, null);
+    }
+
+    /**
+     * @param name     nama tab; null/kosong -> "shell <n>"
+     * @param distroId distro untuk sesi ini; null -> distro aktif. Harus sudah
+     *                 terpasang, kalau tidak dilempar IOException.
+     */
+    public Session create(String name, String distroId) throws IOException {
         synchronized (sessions) {
             if (sessions.size() >= MAX_SESSIONS) {
                 throw new IOException("maksimal " + MAX_SESSIONS + " sesi; tutup salah satu dulu");
             }
         }
+        String distro = (distroId == null || distroId.isEmpty())
+                ? DistroCatalog.activeId(ctx) : distroId;
+        if (!DistroCatalog.isInstalled(ctx, distro)) {
+            throw new IOException("distro " + distro + " belum terpasang");
+        }
         String id = "s" + seq.getAndIncrement();
         while (sessions.containsKey(id)) id = "s" + seq.getAndIncrement();
-        Session s = new Session(id, sanitize(name, id), System.currentTimeMillis());
+        Session s = new Session(id, sanitize(name, id), distro, System.currentTimeMillis());
         sessions.put(id, s);
         startSupervisor(s);
         persistAsync();
@@ -324,8 +348,9 @@ public final class SessionManager {
             s.pty = p;
             s.alive = true;
             s.lastError = null;
-            notice(s, "\r\n[sesi baru dimulai: "
-                    + ProotSession.detectShell(ProotSession.activeRootfsDir(ctx)) + "]\r\n");
+            notice(s, "\r\n[sesi baru dimulai: " + s.distroId + " "
+                    + ProotSession.detectShell(ProotSession.rootfsDir(ctx.getFilesDir(), s.distroId))
+                    + "]\r\n");
             requestSize(s);
 
             pump(s, p);
@@ -349,12 +374,40 @@ public final class SessionManager {
         s.alive = false;
     }
 
+    /**
+     * Bind tambahan untuk guest. /sdcard hanya dibind kalau pengguna sudah
+     * memberikan izin penyimpanan (tanpa itu proot akan gagal membacanya dan
+     * perintah di dalam guest hanya melihat direktori kosong).
+     */
+    static java.util.List<String> extraBinds(Context ctx) {
+        java.util.List<String> binds = new java.util.ArrayList<>();
+        if (hasStoragePermission(ctx)) {
+            java.io.File ext = android.os.Environment.getExternalStorageDirectory();
+            if (ext != null && ext.isDirectory()) {
+                binds.add(ext.getAbsolutePath());
+                binds.add("/sdcard");
+            }
+        }
+        return binds;
+    }
+
+    /** true kalau izin baca/tulis penyimpanan bersama sudah diberikan. */
+    public static boolean hasStoragePermission(Context ctx) {
+        try {
+            return ctx.checkSelfPermission(
+                    android.Manifest.permission.READ_EXTERNAL_STORAGE)
+                    == android.content.pm.PackageManager.PERMISSION_GRANTED;
+        } catch (RuntimeException e) {
+            return false;
+        }
+    }
+
     private PtyHelper openSession(Session s) throws Exception {
         java.io.File filesDir = ctx.getFilesDir();
         String nativeLibDir = ProotSession.nativeLibraryDir(ctx);
-        java.io.File rootfs = ProotSession.activeRootfsDir(ctx);
+        java.io.File rootfs = ProotSession.rootfsDir(filesDir, s.distroId);
         return PtyHelper.start(s.id, filesDir, nativeLibDir, rootfs,
-                ProotSession.buildCommand(nativeLibDir, rootfs),
+                ProotSession.buildCommand(nativeLibDir, rootfs, extraBinds(ctx)),
                 ProotSession.environment(filesDir, nativeLibDir, rootfs));
     }
 
@@ -390,6 +443,7 @@ public final class SessionManager {
                     .append(",\"name\":\"").append(sanitize(s.name, s.id)).append('"')
                     .append(",\"rows\":").append(s.rows)
                     .append(",\"cols\":").append(s.cols)
+                    .append(",\"distro\":\"").append(s.distroId).append('"')
                     .append(",\"created\":").append(s.createdAt)
                     .append('}');
         }
@@ -462,6 +516,7 @@ public final class SessionManager {
                     .append(",\"rows\":").append(s.rows)
                     .append(",\"cols\":").append(s.cols)
                     .append(",\"restarts\":").append(s.restarts)
+                    .append(",\"distro\":\"").append(s.distroId).append('"')
                     .append(",\"created\":").append(s.createdAt)
                     .append('}');
         }

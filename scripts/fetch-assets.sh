@@ -7,6 +7,8 @@ SDIR="$(cd "$(dirname "$0")" && pwd)"
 ASSETS="$SDIR/../android/app/src/main/assets"
 ROOTFS_DISTRO="${ROOTFS_DISTRO:-alpine}"
 XTERM_VER="${XTERM_VER:-6.0.0}"
+SEARCH_VER="${SEARCH_VER:-0.16.0}"
+WEBLINKS_VER="${WEBLINKS_VER:-0.12.0}"
 FIT_VER="${FIT_VER:-0.11.0}"
 
 mkdir -p "$ASSETS/bin" "$ASSETS/web"
@@ -59,13 +61,16 @@ curl -fsSL -o "$ASSETS/web/xterm.js"   "https://cdn.jsdelivr.net/npm/@xterm/xter
 curl -fsSL -o "$ASSETS/web/xterm.css"  "https://cdn.jsdelivr.net/npm/@xterm/xterm@$XTERM_VER/lib/xterm.css"
 # paket scoped @xterm/addon-fit (paket lama @xterm/xterm-addon-fit sudah deprecated)
 curl -fsSL -o "$ASSETS/web/fit.js"     "https://cdn.jsdelivr.net/npm/@xterm/addon-fit@$FIT_VER/lib/addon-fit.js"
+# pencarian (Ctrl-F) + tautan web yang bisa diklik
+curl -fsSL -o "$ASSETS/web/search.js"   "https://cdn.jsdelivr.net/npm/@xterm/addon-search@$SEARCH_VER/lib/addon-search.js"
+curl -fsSL -o "$ASSETS/web/weblinks.js" "https://cdn.jsdelivr.net/npm/@xterm/addon-web-links@$WEBLINKS_VER/lib/addon-web-links.js"
 
 # verifikasi: file kosong/berisi halaman error = APK cuma menampilkan layar hitam
-for f in xterm.js xterm.css fit.js; do
+for f in xterm.js xterm.css fit.js search.js weblinks.js; do
     [ -s "$ASSETS/web/$f" ] || { echo "  GAGAL: $f kosong/tidak terunduh" >&2; exit 1; }
 done
 grep -q "Terminal" "$ASSETS/web/xterm.js" || { echo "  GAGAL: xterm.js bukan bundle UMD" >&2; exit 1; }
-echo "  xterm.js/xterm.css/fit.js ok"
+echo "  xterm.js/xterm.css/fit.js/search.js/weblinks.js ok"
 
 echo "== 4. update bootstrap.json =="
 JF="$ASSETS/bootstrap.json"

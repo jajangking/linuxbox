@@ -132,13 +132,23 @@ SessionManager
   koneksi setengah terbuka; browser juga memanggil `/healthz` tiap 15 detik
   untuk mendeteksi server yang mati/hidup lagi.
 
+### Distro per sesi & akses /sdcard
+
+- **Tiap sesi boleh memakai distro berbeda**: satu tab alpine, tab lain ubuntu.
+  `POST /api/sessions?distro=ubuntu-2404` — distro yang belum terpasang ditolak
+  dengan 503. Pilihan distro tersedia di dropdown sebelah tombol *+ Sesi*.
+- **`/sdcard` di-bind otomatis** ke dalam guest kalau izin penyimpanan sudah
+  diberikan (diminta saat aplikasi dibuka). Statusnya tampil di baris status web
+  (`sdcard ✓`). Kalau ditolak, perintah di dalam distro tidak melihat berkas HP.
+
 ### Endpoint API
 
 | Endpoint | Kegunaan |
 |---|---|
 | `GET /healthz`, `GET /api/status` | status server: port, uptime, jumlah sesi, distro, shell, `lastError` |
 | `GET /api/sessions` | daftar sesi: id, nama, hidup/mati, jumlah penonton, ukuran |
-| `POST /api/sessions` | buat sesi baru (`?name=` opsional) |
+| `GET /api/distros` | daftar distro + status terpasang + distro aktif |
+| `POST /api/sessions` | buat sesi baru (`?name=`, `?distro=` opsional) |
 | `POST /api/sessions/<id>/kill` | tutup sesi |
 | `POST /api/sessions/<id>/rename?name=` | ganti nama tab |
 | `ws /ws?session=<id>` | aliran byte PTY (frame **binary**) |
@@ -151,6 +161,10 @@ SessionManager
 - Menyambung ulang otomatis dengan backoff saat koneksi putus (pesan
   "[sambungan putus, menyambung ulang…]"), dan mendeteksi server yang mati
   lewat `/healthz` lalu menyambung lagi begitu server kembali.
+- **Cari di terminal** (Ctrl-F atau tombol *Cari*) memakai addon
+  `@xterm/addon-search`; tautan `http(s)://` bisa diklik
+  (`@xterm/addon-web-links`). Keduanya opsional — tanpa berkas addon, terminal
+  tetap berjalan normal.
 - Tombol: bersihkan layar, `A−`/`A+` ukuran huruf, sambung ulang, bantuan.
 - Di HP muncul baris tombol sentuh (esc, tab, `^C`, `^D`, `^Z`, panah, `/`, `|`)
   karena keyboard virtual tidak punya tombol itu.
@@ -331,6 +345,9 @@ memasang distro dengan versi sebelumnya, jalankan **'Pasang distro'** sekali lag
 - [x] Hardening: validasi path entry tar (Zip-slip) + symlink escape, autentikasi token
 - [x] Multi-sesi (tab terminal) + auto-restart per sesi + persistensi keadaan
 - [x] Service tahan banting (START_STICKY, WakeLock/WifiLock, keepalive PING)
+- [x] Efisiensi: I/O ber-buffer, batas koneksi, WakeLock dilepas saat idle
+- [x] Distro per sesi + bind `/sdcard` (izin runtime)
+- [x] Pencarian terminal (Ctrl-F) + tautan web bisa diklik
 - [ ] Verifikasi tanda tangan (GPG/SHA256SUMS) saat mengunduh distro
 - [ ] Lanjutkan unduhan yang terputus (HTTP Range)
 - [ ] Enkripsi backup rootfs

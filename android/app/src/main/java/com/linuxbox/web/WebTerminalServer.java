@@ -136,12 +136,32 @@ public class WebTerminalServer {
                 .append(",\"auth\":").append(token != null && !token.isEmpty())
                 .append(",\"distro\":\"").append(DistroCatalog.activeId(ctx)).append('"')
                 .append(",\"shell\":\"")
-                .append(ProotSession.detectShell(ProotSession.activeRootfsDir(ctx))).append('"');
+                .append(ProotSession.detectShell(ProotSession.activeRootfsDir(ctx)))
+                .append('"')
+                .append(",\"storage\":").append(SessionManager.hasStoragePermission(ctx));
         String err = firstError();
         if (err != null) {
             sb.append(",\"lastError\":\"").append(err.replace("\"", "'").replace("\n", " ")).append('"');
         }
         sb.append('}');
+        return sb.toString();
+    }
+
+    /** Daftar distro + status terpasang, untuk pemilih distro di UI. */
+    private String distrosJson() {
+        String active = DistroCatalog.activeId(ctx);
+        StringBuilder sb = new StringBuilder();
+        sb.append("{\"active\":\"").append(active).append("\",\"distros\":[");
+        boolean first = true;
+        for (DistroCatalog.Distro d : DistroCatalog.load(ctx)) {
+            if (!first) sb.append(',');
+            first = false;
+            sb.append("{\"id\":\"").append(d.id).append('"')
+                    .append(",\"label\":\"").append(d.label.replace("\"", "'")).append('"')
+                    .append(",\"installed\":").append(DistroCatalog.isInstalled(ctx, d.id))
+                    .append('}');
+        }
+        sb.append("]}");
         return sb.toString();
     }
 
@@ -240,10 +260,12 @@ public class WebTerminalServer {
             } else if ("/api/sessions".equals(path)) {
                 if ("POST".equals(method)) {
                     String name = queryParam(target, "name");
+                    String distro = queryParam(target, "distro");
                     try {
-                        SessionManager.Session s = sessions.create(name);
+                        SessionManager.Session s = sessions.create(name, distro);
                         serveJson(output, "{\"id\":\"" + s.id + "\",\"name\":\""
-                                + SessionManager.sanitize(s.displayName(), s.id) + "\"}");
+                                + SessionManager.sanitize(s.displayName(), s.id)
+                                + "\",\"distro\":\"" + s.distroId + "\"}");
                     } catch (IOException e) {
                         serveJson(output, "{\"error\":\"" + String.valueOf(e.getMessage())
                                 .replace("\"", "'") + "\"}", 503);
@@ -251,6 +273,8 @@ public class WebTerminalServer {
                 } else {
                     serveJson(output, sessions.sessionsJson());
                 }
+            } else if ("/api/distros".equals(path)) {
+                serveJson(output, distrosJson());
             } else if (path.startsWith("/api/sessions/")) {
                 handleSessionAction(path, target, method, output);
             } else if ("websocket".equalsIgnoreCase(headers.get("upgrade"))) {

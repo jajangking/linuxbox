@@ -53,6 +53,7 @@ public class MainActivity extends Activity {
 
     private static final int DEFAULT_PORT = 8770;
     private static final int REQ_RESTORE = 4242;
+    private static final int REQ_STORAGE = 4243;
     private static final String PREFS = "linuxbox";
 
     private TextView log;
@@ -248,6 +249,7 @@ public class MainActivity extends Activity {
 
         showState(false, null, 0);
         refreshInfo();
+        ensureStoragePermission();
 
         append("LinuxBox siap.");
         if (prefs().getBoolean("srv_wanted", false)) {
@@ -496,6 +498,34 @@ public class MainActivity extends Activity {
                     tmp.delete();
                 }
             });
+        }
+    }
+
+    /**
+     * Izin penyimpanan diperlukan supaya /sdcard bisa di-bind ke dalam guest.
+     * Tanpa itu, perintah di dalam distro hanya melihat direktori kosong.
+     */
+    private void ensureStoragePermission() {
+        if (android.os.Build.VERSION.SDK_INT < 23) return;
+        if (checkSelfPermission(android.Manifest.permission.READ_EXTERNAL_STORAGE)
+                == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            return;
+        }
+        requestPermissions(new String[]{
+                android.Manifest.permission.READ_EXTERNAL_STORAGE,
+                android.Manifest.permission.WRITE_EXTERNAL_STORAGE
+        }, REQ_STORAGE);
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] results) {
+        super.onRequestPermissionsResult(requestCode, permissions, results);
+        if (requestCode == REQ_STORAGE) {
+            boolean granted = results != null && results.length > 0
+                    && results[0] == android.content.pm.PackageManager.PERMISSION_GRANTED;
+            append(granted
+                    ? "  /sdcard akan di-bind ke sesi baru"
+                    : "  izin penyimpanan ditolak — /sdcard tidak bisa diakses dari guest");
         }
     }
 
