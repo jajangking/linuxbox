@@ -38,6 +38,11 @@ import java.util.concurrent.atomic.AtomicInteger;
 public final class SessionManager {
 
     public static final int MAX_SESSIONS = 8;
+
+    /** Sesi distro: jalan di dalam rootfs lewat proot/proroot. */
+    public static final String KIND_DISTRO = "distro";
+    /** Sesi shell native: busybox langsung di atas bionic, tanpa rootfs/proot. */
+    public static final String KIND_NATIVE = "native";
     static final int SCROLLBACK_MAX = 128 * 1024;
     static final int PERSIST_SCROLLBACK_MAX = 64 * 1024;
 
@@ -59,6 +64,10 @@ public final class SessionManager {
         public final String id;
         /** Distro yang dipakai sesi ini; tiap sesi boleh beda (tab alpine + tab ubuntu). */
         public final String distroId;
+        /** {@link #KIND_DISTRO} atau {@link #KIND_NATIVE}. */
+        public final String kind;
+        /** Mesin yang terakhir dipakai: proot / proroot / native (untuk ditampilkan). */
+        public volatile String engine = "";
         public final long createdAt;
         public volatile String name;
         public volatile int rows = 24;
@@ -75,11 +84,17 @@ public final class SessionManager {
         /** true kalau ada output baru yang belum ditulis ke disk. */
         volatile boolean scrollDirty;
 
-        Session(String id, String name, String distroId, long createdAt) {
+        Session(String id, String name, String distroId, String kind, long createdAt) {
             this.id = id;
             this.name = name;
             this.distroId = distroId;
+            this.kind = (kind == null || kind.isEmpty()) ? KIND_DISTRO : kind;
             this.createdAt = createdAt;
+        }
+
+        /** true kalau sesi ini shell native (tanpa rootfs). */
+        public boolean isNative() {
+            return KIND_NATIVE.equals(kind);
         }
 
         public String displayName() {
@@ -149,11 +164,17 @@ public final class SessionManager {
                         String name = sanitize(jsonString(obj, "name"), "shell");
                         long created = jsonLong(obj, "created");
                         String distro = jsonString(obj, "distro");
-                        if (distro == null || distro.isEmpty()
-                                || !DistroCatalog.isInstalled(this.ctx, distro)) {
+                        String kind = jsonString(obj, "kind");
+                        boolean nativeS = KIND_NATIVE.equals(kind);
+                        // Sesi native tidak butuh distro terpasang; sesi distro
+                        // jatuh ke distro aktif kalau rootfs-nya sudah hilang.
+                        if (!nativeS && (distro == null || distro.isEmpty()
+                                || !DistroCatalog.isInstalled(this.ctx, distro))) {
                             distro = DistroCatalog.activeId(this.ctx);
                         }
+                        if (nativeS) distro = distro == null ? "" : distro;
                         Session s = new Session(id, name, distro,
+                                nativeS ? KIND_NATIVE : KIND_DISTRO,
                                 created > 0 ? created : System.currentTimeMillis());
                         int rows = (int) jsonLong(obj, "rows");
                         int cols = (int) jsonLong(obj, "cols");
@@ -198,7 +219,34 @@ public final class SessionManager {
         }
         String id = "s" + seq.getAndIncrement();
         while (sessions.containsKey(id)) id = "s" + seq.getAndIncrement();
-        Session s = new Session(id, sanitize(name, id), distro, System.currentTimeMillis());
+        Session s = new Session(id, sanitize(name, id), distro, KIND_DISTRO,
+                System.currentTimeMillis());
+        sessions.put(id, s);
+        startSupervisor(s);
+        persistAsync();
+        return s;
+    }
+
+    /**
+     * Sesi shell native: busybox jalan langsung di atas libc bionic, tanpa
+     * proot &amp; tanpa rootfs. Ini yang paling ringan — nol intersep syscall —
+     * dan tetap berguna walaupun distro sama sekali belum dipasang.
+     */
+    public Session createNative(String name) throws IOException {
+        synchronized (sessions) {
+            if (sessions.size() >= MAX_SESSIONS) {
+                throw new IOException("maksimal " + MAX_SESSIONS + " sesi; tutup salah satu dulu");
+            }
+        }
+        String nativeLibDir = ProotSession.nativeLibraryDir(ctx);
+        if (!ProotSession.hasNativeShell(nativeLibDir)) {
+            throw new IOException("shell native belum tersedia "
+                    + "(busybox tidak ada di " + nativeLibDir + ")");
+        }
+        String id = "s" + seq.getAndIncrement();
+        while (sessions.containsKey(id)) id = "s" + seq.getAndIncrement();
+        Session s = new Session(id, sanitize(name, "native"), "", KIND_NATIVE,
+                System.currentTimeMillis());
         sessions.put(id, s);
         startSupervisor(s);
         persistAsync();
@@ -348,8 +396,13 @@ public final class SessionManager {
             s.pty = p;
             s.alive = true;
             s.lastError = null;
-            notice(s, "\r\n[sesi baru dimulai: " + s.distroId + " "
-                    + ProotSession.detectShell(ProotSession.rootfsDir(ctx.getFilesDir(), s.distroId))
+            String info = s.isNative()
+                    ? "shell native " + ProotSession.Engine.NATIVE.id
+                    : s.distroId + " "
+                        + ProotSession.detectShell(
+                            ProotSession.rootfsDir(ctx.getFilesDir(), s.distroId))
+                        + " [" + s.engine + "]";
+            notice(s, "\r\n[sesi baru dimulai: " + info
                     + "]\r\n");
             requestSize(s);
 
@@ -405,10 +458,22 @@ public final class SessionManager {
     private PtyHelper openSession(Session s) throws Exception {
         java.io.File filesDir = ctx.getFilesDir();
         String nativeLibDir = ProotSession.nativeLibraryDir(ctx);
+        if (s.isNative()) {
+            // Tanpa proot: langsung fork busybox. Tidak ada rootfs, jadi
+            // PtyHelper.start dipanggil dengan rootfs = filesDir (dipakai
+            // sebagai cwd host yang pasti ada & bisa ditulis).
+            s.engine = ProotSession.Engine.NATIVE.id;
+            return PtyHelper.startNative(s.id, filesDir, nativeLibDir,
+                    ProotSession.nativeCommand(nativeLibDir),
+                    ProotSession.nativeEnvironment(filesDir, nativeLibDir));
+        }
         java.io.File rootfs = ProotSession.rootfsDir(filesDir, s.distroId);
+        // proroot kalau tersedia & rootfs-nya glibc; selain itu proot klasik.
+        ProotSession.Engine engine = ProotSession.engineFor(nativeLibDir, s.distroId);
+        s.engine = engine.id;
         return PtyHelper.start(s.id, filesDir, nativeLibDir, rootfs,
-                ProotSession.buildCommand(nativeLibDir, rootfs, extraBinds(ctx)),
-                ProotSession.environment(filesDir, nativeLibDir, rootfs));
+                ProotSession.buildCommand(engine, nativeLibDir, rootfs, extraBinds(ctx)),
+                ProotSession.environment(engine, filesDir, nativeLibDir, rootfs));
     }
 
     private void pump(Session s, PtyHelper p) {
@@ -444,6 +509,8 @@ public final class SessionManager {
                     .append(",\"rows\":").append(s.rows)
                     .append(",\"cols\":").append(s.cols)
                     .append(",\"distro\":\"").append(s.distroId).append('"')
+                    .append(",\"kind\":\"").append(s.kind).append('"')
+                    .append(",\"engine\":\"").append(s.engine).append('"')
                     .append(",\"created\":").append(s.createdAt)
                     .append('}');
         }
@@ -517,6 +584,8 @@ public final class SessionManager {
                     .append(",\"cols\":").append(s.cols)
                     .append(",\"restarts\":").append(s.restarts)
                     .append(",\"distro\":\"").append(s.distroId).append('"')
+                    .append(",\"kind\":\"").append(s.kind).append('"')
+                    .append(",\"engine\":\"").append(s.engine).append('"')
                     .append(",\"created\":").append(s.createdAt)
                     .append('}');
         }

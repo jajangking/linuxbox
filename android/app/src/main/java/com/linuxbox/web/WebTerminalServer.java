@@ -27,7 +27,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
  *   GET  /                       halaman terminal (multi-tab)
  *   GET  /healthz, /api/status   status server + sesi (JSON)
  *   GET  /api/sessions           daftar sesi
- *   POST /api/sessions           buat sesi baru (?name=opsional)
+ *   POST /api/sessions           buat sesi baru
+ *                                (?name=, ?distro=, ?kind=native|distro)
+ *   GET  /api/engines            mesin yang tersedia (native/distro + proroot)
  *   POST /api/sessions/<id>/kill tutup sesi
  *   POST /api/sessions/<id>/rename?name=...
  *   ws   /ws?session=<id>        aliran byte PTY (frame BINARY)
@@ -139,6 +141,10 @@ public class WebTerminalServer {
                 .append(ProotSession.detectShell(ProotSession.activeRootfsDir(ctx)))
                 .append('"')
                 .append(",\"storage\":").append(SessionManager.hasStoragePermission(ctx));
+                        .append(",\"nativeShell\":").append(
+                                ProotSession.hasNativeShell(ProotSession.nativeLibraryDir(ctx)))
+                        .append(",\"proroot\":").append(
+                                ProotSession.hasProroot(ProotSession.nativeLibraryDir(ctx)));
         String err = firstError();
         if (err != null) {
             sb.append(",\"lastError\":\"").append(err.replace("\"", "'").replace("\n", " ")).append('"');
@@ -147,6 +153,25 @@ public class WebTerminalServer {
         return sb.toString();
     }
 
+    /**
+     * Mesin yang tersedia, untuk dropdown sesi baru di UI. "native" cuma
+     * muncul kalau busybox ikut terbundel di APK.
+     */
+    private String enginesJson() {
+        String nativeLibDir = ProotSession.nativeLibraryDir(ctx);
+        StringBuilder sb = new StringBuilder();
+        sb.append("{\"engines\":[");
+        sb.append("{\"id\":\"native\",\"label\":\"Shell cepat (native, tanpa proot)\"")
+                .append(",\"available\":")
+                .append(ProotSession.hasNativeShell(nativeLibDir)).append('}');
+        sb.append(",{\"id\":\"distro\",\"label\":\"Distro (proot)\"")
+                .append(",\"available\":").append(!DistroCatalog.load(ctx).isEmpty())
+                .append('}');
+        sb.append("],\"proroot\":").append(ProotSession.hasProroot(nativeLibDir))
+                .append('}');
+        return sb.toString();
+    }
+    
     /** Daftar distro + status terpasang, untuk pemilih distro di UI. */
     private String distrosJson() {
         String active = DistroCatalog.activeId(ctx);
@@ -261,11 +286,15 @@ public class WebTerminalServer {
                 if ("POST".equals(method)) {
                     String name = queryParam(target, "name");
                     String distro = queryParam(target, "distro");
+                    String kind = queryParam(target, "kind");
                     try {
-                        SessionManager.Session s = sessions.create(name, distro);
+                        SessionManager.Session s = SessionManager.KIND_NATIVE.equals(kind)
+                                ? sessions.createNative(name)
+                                : sessions.create(name, distro);
                         serveJson(output, "{\"id\":\"" + s.id + "\",\"name\":\""
                                 + SessionManager.sanitize(s.displayName(), s.id)
-                                + "\",\"distro\":\"" + s.distroId + "\"}");
+                                + ",\"distro\":\"" + s.distroId + "\""
+                                + ",\"kind\":\"" + s.kind + "\"}");
                     } catch (IOException e) {
                         serveJson(output, "{\"error\":\"" + String.valueOf(e.getMessage())
                                 .replace("\"", "'") + "\"}", 503);
@@ -273,7 +302,9 @@ public class WebTerminalServer {
                 } else {
                     serveJson(output, sessions.sessionsJson());
                 }
-            } else if ("/api/distros".equals(path)) {
+                    } else if ("/api/engines".equals(path)) {
+                        serveJson(output, enginesJson());
+                    } else if ("/api/distros".equals(path)) {
                 serveJson(output, distrosJson());
             } else if (path.startsWith("/api/sessions/")) {
                 handleSessionAction(path, target, method, output);

@@ -89,6 +89,41 @@ public class PtyHelper {
     }
 
     /**
+     * Mode NATIVE: tanpa proot dan tanpa rootfs. Yang wajib ada &amp; executable
+     * cuma helper PTY dan binary yang dijalankan (busybox) — berbeda dengan
+     * {@link #start} yang menuntut rootfs sudah terpasang.
+     */
+    public static PtyHelper startNative(String id, File filesDir, String nativeLibDir,
+                                        java.util.List<String> command,
+                                        java.util.Map<String, String> env) throws Exception {
+        File helper = ProotSession.ptyBin(nativeLibDir);
+        requireExecutable(helper, "ptylauncher");
+        if (command == null || command.isEmpty()) {
+            throw new IOException("command shell native kosong");
+        }
+        requireExecutable(new File(command.get(0)), "shell native");
+
+        File ctrl = new File(filesDir,
+                (id == null || id.isEmpty()) ? "ctrl.sock" : "ctrl-" + id + ".sock");
+        if (ctrl.exists()) ctrl.delete();
+        java.util.Map<String, String> e = new java.util.HashMap<>(env);
+        e.put(CTRL_ENV, ctrl.getAbsolutePath());
+        if (new File(filesDir, ".debug").isFile()) e.put("LINUXBOX_DEBUG", "1");
+
+        java.util.List<String> argv = new java.util.ArrayList<>();
+        argv.add(helper.getAbsolutePath());
+        argv.addAll(command);
+        ProcessBuilder pb = new ProcessBuilder(argv);
+        pb.directory(filesDir);
+        pb.environment().clear();
+        pb.environment().putAll(e);
+
+        PtyHelper h = new PtyHelper(pb.start(), ctrl);
+        h.openControl();
+        return h;
+    }
+
+    /**
      * Sambung ke socket kontrol helper. Best-effort: kalau gagal (Android versi
      * tertentu, path terlalu panjang, helper telat bind), terminal tetap jalan
      * hanya dengan ukuran 80x24.

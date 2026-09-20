@@ -141,6 +141,39 @@ SessionManager
   diberikan (diminta saat aplikasi dibuka). Statusnya tampil di baris status web
   (`sdcard ✓`). Kalau ditolak, perintah di dalam distro tidak melihat berkas HP.
 
+### Tiga mesin: native, proot, proroot
+
+Riset Termux/PRoot menunjukkan biaya terbesar ada di `ptrace()`: tiap syscall
+guest memicu context switch (UNIXbench ≈ −44% dibanding chroot). Karena itu
+linuxbox menyediakan tiga mesin, dipilih otomatis atau lewat dropdown sesi baru:
+
+| Mesin | Cara kerja | Dipakai untuk | Syarat |
+|---|---|---|---|
+| **native** | `busybox sh` langsung di atas libc bionic — tanpa proot, tanpa rootfs | pekerjaan ringan yang tidak butuh paket distro; tetap jalan walau distro belum dipasang | `libbusybox.so` di `app/src/main/jniLibs/arm64-v8a/` |
+| **proot** (klasik) | intersep syscall via `ptrace()` | semua distro, termasuk musl (Alpine) | `libproot.so` + loader (sudah ada) |
+| **proroot** | drop-in proot tanpa ptrace: `LD_PRELOAD` + binary patching `svc #0` | distro **glibc** (Ubuntu) — kecepatan mendekati native | 5 `.so` proroot di `jniLibs/arm64-v8a/` |
+
+Aturan pemilihan (`ProotSession.engineFor()`): sesi distro glibc memakai
+**proroot** kalau tersedia, distro musl (Alpine) selalu **proot** karena proroot
+menyisipkan loader glibc-nya sendiri. Mesin yang terakhir dipakai dilaporkan di
+`/api/sessions` (field `engine`) dan di baris "[sesi baru dimulai: …]".
+
+**Cara mengaktifkan mesin tambahan** (keduanya opsional; tanpa berkas ini aplikasi
+tetap jalan dengan proot klasik):
+
+```sh
+# proroot — lisensi proprietary: boleh dipakai, tidak boleh didistribusi ulang
+# dalam bentuk modifikasi, jadi TIDAK di-commit ke repo ini.
+cp libproroot.so libproroot-runtime.so libproroot-linker.so \
+   libproroot-bridge.so libproroot-stub-loader.so \
+   android/app/src/main/jniLibs/arm64-v8a/
+
+# shell native — busybox dari APK Termux (perhatikan lisensi GPLv2 bila mau
+# ikut mendistribusikan binary-nya di APK kamu sendiri)
+unzip -p termux-app.apk lib/arm64-v8a/libbusybox.so \
+  > android/app/src/main/jniLibs/arm64-v8a/libbusybox.so
+```
+
 ### Endpoint API
 
 | Endpoint | Kegunaan |
@@ -148,7 +181,8 @@ SessionManager
 | `GET /healthz`, `GET /api/status` | status server: port, uptime, jumlah sesi, distro, shell, `lastError` |
 | `GET /api/sessions` | daftar sesi: id, nama, hidup/mati, jumlah penonton, ukuran |
 | `GET /api/distros` | daftar distro + status terpasang + distro aktif |
-| `POST /api/sessions` | buat sesi baru (`?name=`, `?distro=` opsional) |
+| `POST /api/sessions` | buat sesi baru (`?name=`, `?distro=`, `?kind=native`) |
+| `GET /api/engines` | mesin yang tersedia (native/distro) + status proroot |
 | `POST /api/sessions/<id>/kill` | tutup sesi |
 | `POST /api/sessions/<id>/rename?name=` | ganti nama tab |
 | `ws /ws?session=<id>` | aliran byte PTY (frame **binary**) |
@@ -161,6 +195,7 @@ SessionManager
 - Menyambung ulang otomatis dengan backoff saat koneksi putus (pesan
   "[sambungan putus, menyambung ulang…]"), dan mendeteksi server yang mati
   lewat `/healthz` lalu menyambung lagi begitu server kembali.
+- Dropdown sesi baru memilih **shell cepat (native)** atau distro tertentu.
 - **Cari di terminal** (Ctrl-F atau tombol *Cari*) memakai addon
   `@xterm/addon-search`; tautan `http(s)://` bisa diklik
   (`@xterm/addon-web-links`). Keduanya opsional — tanpa berkas addon, terminal
@@ -348,6 +383,10 @@ memasang distro dengan versi sebelumnya, jalankan **'Pasang distro'** sekali lag
 - [x] Efisiensi: I/O ber-buffer, batas koneksi, WakeLock dilepas saat idle
 - [x] Distro per sesi + bind `/sdcard` (izin runtime)
 - [x] Pencarian terminal (Ctrl-F) + tautan web bisa diklik
+- [x] Mesin pluggable: shell native (bionic) / proot / proroot
+- [ ] Verifikasi tanda tangan (SHA-256) unduhan distro saat bootstrap
+- [ ] Lanjutkan unduhan distro yang putus lewat HTTP Range
+- [ ] Enkripsi backup rootfs (passphrase)
 - [ ] Verifikasi tanda tangan (GPG/SHA256SUMS) saat mengunduh distro
 - [ ] Lanjutkan unduhan yang terputus (HTTP Range)
 - [ ] Enkripsi backup rootfs

@@ -195,6 +195,7 @@
   var fontSize = 14;
   var distros = [];
   var storageOk = false;
+  var prorootOk = false;
 
   var term = new Terminal({
     cursorBlink: true, fontFamily: 'monospace', fontSize: fontSize,
@@ -253,19 +254,29 @@
     });
   }
 
+  // Isi dropdown sesi baru: shell native (kalau busybox ada) + distro terpasang.
   function refreshDistros() {
-    return api('/api/distros').then(function (d) {
-      distros = (d.distros || []).filter(function (x) { return x.installed; });
+    var eng = api('/api/engines').catch(function () { return null; });
+    var dis = api('/api/distros').catch(function () { return null; });
+    return Promise.all([eng, dis]).then(function (r) {
+      var engines = (r[0] && r[0].engines) || [];
+      distros = ((r[1] && r[1].distros) || []).filter(function (x) { return x.installed; });
       var sel = document.getElementById('distroSel');
       var prev = sel.value;
       sel.innerHTML = '';
-      distros.forEach(function (x) {
+      function opt(value, label) {
         var o = document.createElement('option');
-        o.value = x.id; o.textContent = x.label || x.id;
+        o.value = value; o.textContent = label;
         sel.appendChild(o);
+      }
+      engines.forEach(function (e) {
+        if (!e.available) return;
+        if (e.id === 'native') opt('native:', e.label || 'Shell cepat (native)');
       });
+      distros.forEach(function (x) { opt('distro:' + x.id, x.label || x.id); });
       if (prev) sel.value = prev;
-      if (distros.length <= 1) sel.style.display = 'none';
+      sel.style.display = (sel.options.length <= 1) ? 'none' : '';
+      prorootOk = !!(r[0] && r[0].proroot);
     }).catch(function () {});
   }
 
@@ -296,7 +307,8 @@
     sessions.forEach(function (s) {
       var el = document.createElement('div');
       el.className = 'tab' + (s.id === sessionId ? ' active ' : ' ') + (s.alive ? 'alive' : 'dead');
-      el.title = s.name + ' · ' + (s.distro || '?') + ' (klik 2x untuk ganti nama)';
+      el.title = s.name + ' · ' + (s.kind === 'native'
+          ? 'shell native' : (s.distro || '?')) + ' (klik 2x untuk ganti nama)';
       var dot = document.createElement('span');
       dot.className = 'dot';
       var label = document.createElement('span');
@@ -322,7 +334,10 @@
 
   function newSession() {
     var sel = document.getElementById('distroSel');
-    var extra = (sel && sel.value) ? ('?distro=' + encodeURIComponent(sel.value)) : '';
+    var v = (sel && sel.value) ? sel.value : '';
+    var extra = '';
+    if (v.indexOf('native:') === 0) extra = '?kind=native';
+    else if (v.indexOf('distro:') === 0) extra = '?distro=' + encodeURIComponent(v.slice(7));
     api('/api/sessions' + extra, { method: 'POST' }).then(function (data) {
       if (data.error) { setState(data.error, 'bad'); return; }
       return refreshSessions().then(function () { switchSession(data.id); });
@@ -558,7 +573,11 @@
       '• Cari (Ctrl-F) untuk mencari di scrollback; tautan bisa diklik.\n' +
       '• Pilihan distro di sebelah "+ Sesi" menentukan distro sesi baru,\n' +
       '  jadi satu tab bisa alpine dan tab lain ubuntu.\n' +
-      '• status "sdcard ✓" berarti /sdcard di-bind ke dalam guest.');
+      '• status "sdcard ✓" berarti /sdcard di-bind ke dalam guest.\n\n' +
+      'Tiga mesin: pilih "Shell cepat (native)" untuk busybox langsung tanpa\n' +
+      'proot (paling ringan, tanpa distro), atau distro alpine/ubuntu.\n' +
+      (prorootOk ? 'proroot tersedia: distro glibc jalan tanpa ptrace.'
+                 : 'proroot tidak ada di APK: distro jalan lewat proot klasik.'));
   });
   Array.prototype.forEach.call(document.querySelectorAll('#keys button'), function (b) {
     b.addEventListener('click', function () {
