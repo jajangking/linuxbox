@@ -293,7 +293,7 @@ public class WebTerminalServer {
                                 : sessions.create(name, distro);
                         serveJson(output, "{\"id\":\"" + s.id + "\",\"name\":\""
                                 + SessionManager.sanitize(s.displayName(), s.id)
-                                + ",\"distro\":\"" + s.distroId + "\""
+                                + "\",\"distro\":\"" + s.distroId + "\""
                                 + ",\"kind\":\"" + s.kind + "\"}");
                     } catch (IOException e) {
                         serveJson(output, "{\"error\":\"" + String.valueOf(e.getMessage())
