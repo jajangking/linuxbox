@@ -31,6 +31,15 @@ chmod 755 "$JNILIBS/libproot.so"
 for lib in "$PREFIX"/lib/libtalloc.so.2 "$PREFIX"/lib/libandroid-shmem.so; do
     [ -e "$lib" ] && cp "$lib" "$JNILIBS/" && echo "  jniLibs: $(basename "$lib")"
 done
+# Loader proot (dibutuhkan setiap execve guest; lihat ProotSession.LOADER_NAME).
+if [ -e "$PREFIX/libexec/proot/loader" ]; then
+    cp "$PREFIX/libexec/proot/loader" "$JNILIBS/libproot_loader.so"
+    chmod 755 "$JNILIBS/libproot_loader.so"
+    echo "  jniLibs: libproot_loader.so"
+else
+    echo "  PERINGATAN: $PREFIX/libexec/proot/loader tidak ada." >&2
+    echo "    Pastikan paket proot Termux terpasang: pkg install proot" >&2
+fi
 echo "  jniLibs siap di $JNILIBS"
 
 echo "== 2. rootfs ($ROOTFS_DISTRO) =="

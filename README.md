@@ -61,6 +61,37 @@ cd scripts && ./fetch-assets.sh        # jalankan di Termux (isilkan assets)
 > akan menawarkan regenerate wrapper saat dibuka ("Gradle wrapper missing").
 > Butuh NDK + CMake (Studio akan minta install saat pertama build).
 
+### Loader proot wajib ikut dibundel (`PROOT_LOADER`)
+
+proot **tidak** mengeksekusi binary guest secara langsung. Di
+`translate_execve_enter()`, argumen `execve()` diganti dengan path **loader
+internal proot**, lalu loader itu yang menjalankan program guest. proot Termux
+dibangun dengan:
+
+```bash
+export PROOT_UNBUNDLE_LOADER=$TERMUX_PREFIX/libexec/proot   # packages/proot/build.sh
+```
+
+Jadi kalau env `PROOT_LOADER` tidak diset, proot akan mengeksekusi
+`/data/data/com.termux/files/usr/libexec/proot/loader` — direktori data
+**aplikasi lain** (mode 0700) yang tidak bisa di-traverse app kita. Kernel
+menjawab `EACCES`, dan proot melaporkannya sebagai:
+
+```
+proot error: execve("/bin/sh"): Permission denied
+```
+
+Perhatikan: ini bukan SELinux (tidak akan ada `avc: denied`) dan bukan path
+rootfs. Solusinya: salin loader itu ke `lib/arm64-v8a/` supaya berlabel
+`apk_data_file_t`, lalu kirim path-nya lewat `PROOT_LOADER`:
+
+- `scripts/build-apk.sh` → `$PREFIX/libexec/proot/loader` di-stage sebagai
+  `libproot_loader.so` (langkah `[2b]`).
+- `scripts/fetch-assets.sh` → sama, untuk jalur Gradle
+  (`app/src/main/jniLibs/arm64-v8a/`).
+- `ProotSession.environment()` → `PROOT_LOADER=<nativeLibraryDir>/libproot_loader.so`.
+- `Bootstrap` gagal cepat kalau loader tidak ada di `nativeLibraryDir`.
+
 ### Kenapa `targetSdk` dipatok 28
 
 Sejak Android 10, app dengan **targetSdk ≥ 29** (domain SELinux

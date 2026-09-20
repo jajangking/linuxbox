@@ -9,6 +9,20 @@ import java.util.List;
 /** Lokasi & assembly command untuk PRoot session. */
 public final class ProotSession {
 
+    /**
+     * Loader internal proot. proot TIDAK mengeksekusi binary guest langsung:
+     * `translate_execve_enter()` mengganti argumen execve dengan path loadernya
+     * sendiri. proot Termux dibangun dengan
+     * `PROOT_UNBUNDLE_LOADER=$PREFIX/libexec/proot`, jadi tanpa env
+     * PROOT_LOADER ia akan mengeksekusi
+     * `/data/data/com.termux/files/usr/libexec/proot/loader` — direktori data
+     * aplikasi LAIN (mode 0700) yang tidak bisa kita traverse -> EACCES, yang
+     * dilaporkan proot sebagai `execve("/bin/sh"): Permission denied`.
+     * Karena itu loader ikut dibundel di lib/arm64-v8a/ (apk_data_file_t) dan
+     * pathnya dikirim lewat PROOT_LOADER.
+     */
+    public static final String LOADER_NAME = "libproot_loader.so";
+
     private ProotSession() {}
 
     /**
@@ -143,6 +157,10 @@ public final class ProotSession {
         env.put("TMPDIR", hostTmp);
         env.put("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
         env.put("LD_LIBRARY_PATH", nativeLibDir);
+        File loader = new File(nativeLibDir, LOADER_NAME);
+        if (loader.isFile()) {
+            env.put("PROOT_LOADER", loader.getAbsolutePath());
+        }
         return env;
     }
 }

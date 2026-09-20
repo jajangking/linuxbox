@@ -15,15 +15,16 @@
 set -u
 
 DEV="${1:-}"
-ADB="adb"
-[ -n "$DEV" ] && ADB="adb -s $DEV"
+# Pakai array: kalau ADB="adb -s <dev>" (string) lalu dipanggil "$ADB",
+# shell menganggapnya satu kata perintah -> "command not found".
+if [ -n "$DEV" ]; then ADB=(adb -s "$DEV"); else ADB=(adb); fi
 
 PKG="com.linuxbox"
 OUT="$HOME/linuxbox-diag-$(date +%Y%m%d-%H%M%S).txt"
 TMPD="$(mktemp -d)"
 trap 'rm -rf "$TMPD"' EXIT
 
-sh_adb() { "$ADB" shell "$@" 2>&1 | tr -d '\r'; }
+sh_adb() { "${ADB[@]}" shell "$@" 2>&1 | tr -d '\r'; }
 log() { echo "$*" | tee -a "$OUT"; }
 hr()  { printf '%s\n' "------------------------------------------------------------" | tee -a "$OUT"; }
 
@@ -41,10 +42,18 @@ hr
 log "== 2. APK + nativeLibraryDir (harus berlabel apk_data_file_t) =="
 BASE=$(sh_adb "pm path $PKG" | sed 's#package:##; s#/base.apk##')
 log "BASE    : $BASE"
-NATIVE=$(sh_adb "dumpsys package $PKG | grep -E 'nativeLibraryDir' | head -1" | sed 's#.*nativeLibraryDir=##')
-# Android modern: /data/app/~~<random>==/$PKG-<sig>==/lib/arm64 -> pakai path dari dumpsys
+# dumpsys sering hanya punya legacyNativeLibraryDir -> nativeLibraryDir kosong.
+# Yang dipakai PackageManager selalu <base.apk dir>/lib/arm64.
+NATIVE="$BASE/lib/arm64"
 log "nativeLibDir: ${NATIVE:-<(tidak ketemu)>}"
 sh_adb "ls -lZ ${NATIVE:-\$NATIVE}" 2>&1 | tee -a "$OUT"
+hr
+
+log "-- loader proot (PENTING: ini yang dieksekusi proot, bukan /bin/sh) --"
+sh_adb "ls -lZ ${NATIVE:-/data/app}/libproot_loader.so" 2>&1 | tee -a "$OUT"
+log "   proot Termux dikompilasi PROOT_UNBUNDLE_LOADER=/data/data/com.termux/files/usr/libexec/proot"
+log "   -> tanpa PROOT_LOADER, proot mengeksekusi path milik Termux itu -> EACCES."
+log "   PROOT_LOADER yang dikirim app: ${NATIVE:-\$NATIVE}/libproot_loader.so"
 hr
 
 log "== 3. FILES + ROOTFS =="
@@ -60,7 +69,7 @@ hr
 log "== 4. Siapkan files/tmp (TMPDIR host-side) + berkas stdin =="
 sh_adb "run-as $PKG mkdir -p files/tmp && run-as $PKG ls -ld files/tmp" | tee -a "$OUT"
 printf 'echo DIAG-OK id\n' > "$TMPD/t.in"
-"$ADB" push "$TMPD/t.in" /data/local/tmp/t.in >/dev/null 2>&1
+"${ADB[@]}" push "$TMPD/t.in" /data/local/tmp/t.in >/dev/null 2>&1
 sh_adb "run-as $PKG cp /data/local/tmp/t.in files/t.in && run-as $PKG ls -l files/t.in" | tee -a "$OUT"
 
 # ---------------------------------------------------------------- inner script
@@ -93,7 +102,7 @@ for V in A B C; do
   echo
 done
 EOF
-"$ADB" push "$INNER" /data/local/tmp/lb_inner.sh >/dev/null 2>&1
+"${ADB[@]}" push "$INNER" /data/local/tmp/lb_inner.sh >/dev/null 2>&1
 sh_adb "run-as $PKG cp /data/local/tmp/lb_inner.sh files/lb_inner.sh" >/dev/null 2>&1
 
 log "== 5. TIGA VARIAN EKSEKUSI PROOT (stderr ikut tertangkap) =="

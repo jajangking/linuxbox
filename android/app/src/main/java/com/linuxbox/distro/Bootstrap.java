@@ -92,8 +92,9 @@ public class Bootstrap {
         File libTalloc = new File(nativeLibDir, "libtalloc.so.2");
         File libShmem = new File(nativeLibDir, "libandroid-shmem.so");
         File pty = ProotSession.ptyBin(nativeLibDir);
+        File loader = new File(nativeLibDir, ProotSession.LOADER_NAME);
 
-        for (File f : new File[]{proot, libTalloc, libShmem, pty}) {
+        for (File f : new File[]{proot, libTalloc, libShmem, pty, loader}) {
             if (!f.isFile()) {
                 throw new IOException(f.getName() + " tidak ada di " + nativeLibDir
                         + " — APK ini harus dibangun dengan binary di lib/arm64-v8a/");

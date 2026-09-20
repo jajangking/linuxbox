@@ -57,6 +57,10 @@ stage_native "$ASSETS/bin/proot"              libproot.so
 stage_native "$ASSETS/bin/ptylauncher"        libptylauncher.so
 stage_native "$ASSETS/bin/libtalloc.so.2"     libtalloc.so.2
 stage_native "$ASSETS/bin/libandroid-shmem.so" libandroid-shmem.so
+# Loader proot: proot tidak exec binary guest langsung, ia exec loader ini.
+# proot Termux dikompilasi dengan PROOT_UNBUNDLE_LOADER=$PREFIX/libexec/proot,
+# jadi tanpa PROOT_LOADER ia mencari /data/data/com.termux/.../loader -> EACCES.
+stage_native "$PREFIX/libexec/proot/loader" libproot_loader.so
 chmod 755 "$WORK"/jni/lib/arm64-v8a/*
 echo "  jniLibs: $(ls "$WORK/jni/lib/arm64-v8a" | tr '\n' ' ')"
 
