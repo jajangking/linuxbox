@@ -51,8 +51,13 @@ public final class TarUtil {
     public static boolean linkStaysInside(String entryName, String target) {
         if (target == null || target.isEmpty()) return false;
         String t = target.replace('\\', '/');
-        if (t.startsWith("/")) return false;
         if (t.length() >= 2 && Character.isLetter(t.charAt(0)) && t.charAt(1) == ':') return false;
+        if (t.startsWith("/")) {
+            // Target absolut (mis. `bin/sh -> /bin/busybox`, dipakai proot-distro
+            // alpine Ubuntu) sah untuk rootfs: proot/chroot me-resolve di dalam
+            // guest rootfs. Ditolak hanya kalau setelah dinormalisasi keluar root.
+            return normalizePath(t.substring(1)) != null;
+        }
         String dir = parentOf(entryName);
         String combined = dir.isEmpty() ? t : dir + "/" + t;
         return normalizePath(combined) != null;

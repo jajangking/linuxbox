@@ -294,7 +294,7 @@ public class MainActivity extends Activity {
             append("!! Distro " + distro + " belum terpasang. Tap 'Pasang distro' dulu.");
             return;
         }
-        if (!ProotSession.ptyBin(getFilesDir()).exists()) {
+        if (!ProotSession.ptyBin(ProotSession.nativeLibraryDir(this)).exists()) {
             append("!! ptylauncher belum ada. Jalankan 'Pasang distro'.");
             return;
         }

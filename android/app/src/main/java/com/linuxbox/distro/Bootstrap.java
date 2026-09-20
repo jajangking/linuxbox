@@ -83,27 +83,27 @@ public class Bootstrap {
     }
 
     private void bootstrapBinaries() throws Exception {
-        File dir = ctx.getFilesDir();
+        // Binary ada di nativeLibraryDir (label apk_data_file_t) — satu-satunya
+        // yang boleh di-execve oleh untrusted_app_30+/_32 (targetSdk >= 30).
+        // Binary semacam ini yang disalin ke filesDir (app_data_file_t) DITOLAK
+        // kernel dengan error=13 EPERM di SELinux enforcing.
+        String nativeLibDir = ProotSession.nativeLibraryDir(ctx);
+        File proot = ProotSession.prootBin(nativeLibDir);
+        File libTalloc = new File(nativeLibDir, "libtalloc.so.2");
+        File libShmem = new File(nativeLibDir, "libandroid-shmem.so");
+        File pty = ProotSession.ptyBin(nativeLibDir);
 
-        File proot = ProotSession.prootBin(dir);
-        File libTalloc = new File(dir, "bin/libtalloc.so.2");
-        File libShmem = new File(dir, "bin/libandroid-shmem.so");
-        if (!proot.exists() || !libTalloc.exists() || !libShmem.exists()) {
-            log.log("Menyalin proot + libnya...");
-            if (!proot.exists()) {
-                copyAsset("bin/proot", proot);
-                proot.setExecutable(true, false);
+        for (File f : new File[]{proot, libTalloc, libShmem, pty}) {
+            if (!f.isFile()) {
+                throw new IOException(f.getName() + " tidak ada di " + nativeLibDir
+                        + " — APK ini harus dibangun dengan binary di lib/arm64-v8a/");
             }
-            if (!libTalloc.exists()) copyAsset("bin/libtalloc.so.2", libTalloc);
-            if (!libShmem.exists()) copyAsset("bin/libandroid-shmem.so", libShmem);
+            if (!f.canExecute() && !f.setExecutable(true)) {
+                throw new IOException(f.getName() + " tidak bisa dieksekusi: " + f.getAbsolutePath());
+            }
         }
-
-        File pty = ProotSession.ptyBin(dir);
-        if (!pty.exists()) {
-            log.log("Menyalin ptylauncher...");
-            copyAsset("bin/ptylauncher", pty);
-            pty.setExecutable(true, false);
-        }
+        // cache fst compute sebenarnya tidak perlu; cukup pastikan hadir.
+        log.log("Binary native siap (" + nativeLibDir + ").");
     }
 
     private File obtainArchive(DistroCatalog.Distro d) throws Exception {

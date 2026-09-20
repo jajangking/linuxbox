@@ -139,9 +139,11 @@ public class WebTerminalServer {
 
     private PtyHelper openSession() throws Exception {
         File dir = ctx.getFilesDir();
+        String nativeLibDir = ProotSession.nativeLibraryDir(ctx);
         File rootfs = ProotSession.activeRootfsDir(ctx);
-        PtyHelper p = PtyHelper.start(dir, rootfs, ProotSession.buildCommand(dir, rootfs),
-                ProotSession.environment(dir, rootfs));
+        PtyHelper p = PtyHelper.start(dir, nativeLibDir, rootfs,
+                ProotSession.buildCommand(nativeLibDir, rootfs),
+                ProotSession.environment(nativeLibDir, rootfs));
         lastError = null;
         return p;
     }

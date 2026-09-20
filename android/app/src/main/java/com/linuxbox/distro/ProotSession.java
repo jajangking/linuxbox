@@ -25,13 +25,23 @@ public final class ProotSession {
             "/bin/zsh",
     };
 
-    public static File prootBin(File dir) {
-        return new File(dir, "bin/proot");
+    /**
+     * Direktori native library hasil ekstraksi PackageManager. Binary di sini
+     * berlabel apk_data_file_t — satu-satunya label yang boleh di-execve oleh
+     * domain untrusted_app_30/_32 (targetSdk >= 30). Binary yang disalin ke
+     * filesDir (app_data_file_t) TIDAK bisa dieksekusi di SELinux enforcing
+     * (error=13 EPERM).
+     */
+    public static String nativeLibraryDir(Context ctx) {
+        return ctx.getApplicationInfo().nativeLibraryDir;
     }
 
-    /** ptylauncher (di-compile cross Android) disalin dari asset ke filesDir/bin. */
-    public static File ptyBin(File dir) {
-        return new File(dir, "bin/ptylauncher");
+    public static File prootBin(String nativeLibDir) {
+        return new File(nativeLibDir, "proot");
+    }
+
+    public static File ptyBin(String nativeLibDir) {
+        return new File(nativeLibDir, "ptylauncher");
     }
 
     /** Setiap distro punya direktori sendiri: files/rootfs-<id>. */
@@ -61,13 +71,13 @@ public final class ProotSession {
         return "/bin/sh";
     }
 
-    public static List<String> buildCommand(File filesDir, File rootfs) {
-        return buildCommand(filesDir, rootfs, new ArrayList<String>());
+    public static List<String> buildCommand(String nativeLibDir, File rootfs) {
+        return buildCommand(nativeLibDir, rootfs, new ArrayList<String>());
     }
 
-    public static List<String> buildCommand(File filesDir, File rootfs, List<String> extraBind) {
+    public static List<String> buildCommand(String nativeLibDir, File rootfs, List<String> extraBind) {
         List<String> cmd = new ArrayList<>();
-        cmd.add(prootBin(filesDir).getAbsolutePath());
+        cmd.add(prootBin(nativeLibDir).getAbsolutePath());
         cmd.add("--rootfs=" + rootfs.getAbsolutePath());
         cmd.add("--link2symlink");
         cmd.add("-b"); cmd.add("/proc");
@@ -84,7 +94,7 @@ public final class ProotSession {
         return cmd;
     }
 
-    public static java.util.Map<String, String> environment(File filesDir, File rootfs) {
+    public static java.util.Map<String, String> environment(String nativeLibDir, File rootfs) {
         java.util.Map<String, String> env = new java.util.HashMap<>();
         String shell = detectShell(rootfs);
         env.put("HOME", "/root");
@@ -94,7 +104,7 @@ public final class ProotSession {
         env.put("LANG", "C.UTF-8");
         env.put("TMPDIR", "/tmp");
         env.put("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
-        env.put("LD_LIBRARY_PATH", new File(filesDir, "bin").getAbsolutePath());
+        env.put("LD_LIBRARY_PATH", nativeLibDir);
         return env;
     }
 }

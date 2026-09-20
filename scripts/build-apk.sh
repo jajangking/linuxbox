@@ -23,7 +23,7 @@ COMMONS_IO_URL="${COMMONS_IO_URL:-https://repo1.maven.org/maven2/commons-io/comm
 cmds=(javac jar d8 aapt2 apksigner adb curl keytool clang tar sha256sum)
 for c in "${cmds[@]}"; do command -v "$c" >/dev/null || { echo "butuh: $c" >&2; exit 1; }; done
 
-rm -rf "$WORK"; mkdir -p "$GEN" "$ASSETS/bin" "$ASSETS/web" "$WORK/dex" "$WORK/libs"
+rm -rf "$WORK"; mkdir -p "$GEN" "$ASSETS/bin" "$ASSETS/web" "$WORK/dex" "$WORK/libs" "$WORK/jni/lib/arm64-v8a"
 
 echo "[1] proot binary + libs"
 command -v proot >/dev/null || pkg install -y proot
@@ -36,6 +36,15 @@ done
 
 echo "[2] ptylauncher (cross Android $CC_TARGET)"
 clang --target="$CC_TARGET" -O2 -o "$ASSETS/bin/ptylauncher" "$SRC/cpp/ptylauncher.c"
+
+echo "[2b] jniLibs (lib/arm64-v8a, label apk_data_file_t -> boleh di-execve)"
+# Penting: binary harus ada di lib/<abi>/ APK, bukan cuma di assets/bin. App
+# ber-targetSdk>=30 (domain untrusted_app_32) TIDAK boleh execve file berlabel
+# app_data_file_t (filesDir). PackageManager mengekstrak lib/ ke nativeLibraryDir
+# berlabel apk_data_file_t yang DIIZINKAN di-execve.
+cp "$ASSETS/bin/proot" "$ASSETS/bin/ptylauncher" "$ASSETS/bin/libtalloc.so.2" \
+   "$ASSETS/bin/libandroid-shmem.so" "$WORK/jni/lib/arm64-v8a/"
+chmod 755 "$WORK"/jni/lib/arm64-v8a/*
 
 echo "[3] rootfs ($DISTRO)"
 if [ -d "$PREFIX/var/lib/proot-distro/containers/$DISTRO/rootfs" ]; then
@@ -100,10 +109,14 @@ aapt2 link -o "$WORK/unsigned.apk" \
   --version-code 1 --version-name 0.1.0 \
   --auto-add-overlay --package-id 0x7f --allow-reserved-package-id
 
-echo "[10] inject dex"
+echo "[10] inject dex + jniLibs"
 (
 cd "$WORK"
 jar uf unsigned.apk classes.dex
+)
+(
+cd "$WORK/jni"
+jar uf "$WORK/unsigned.apk" lib
 )
 
 echo "[11] sign"

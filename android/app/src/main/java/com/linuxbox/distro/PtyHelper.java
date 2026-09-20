@@ -41,10 +41,11 @@ public class PtyHelper {
         this.ctrlSock = ctrlSock;
     }
 
-    public static PtyHelper start(File filesDir, File rootfs, java.util.List<String> command,
+    public static PtyHelper start(File filesDir, String nativeLibDir, File rootfs,
+                                  java.util.List<String> command,
                                   java.util.Map<String, String> env) throws Exception {
-        File helper = ProotSession.ptyBin(filesDir);
-        File proot = ProotSession.prootBin(filesDir);
+        File helper = ProotSession.ptyBin(nativeLibDir);
+        File proot = ProotSession.prootBin(nativeLibDir);
 
         requireExecutable(helper, "ptylauncher");
         requireExecutable(proot, "proot");

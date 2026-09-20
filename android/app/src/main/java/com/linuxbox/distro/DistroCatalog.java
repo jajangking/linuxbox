@@ -53,7 +53,8 @@ public final class DistroCatalog {
     /** Fallback kalau assets/distros.json tidak ada. */
     private static final Distro[] BUILTIN = {
             new Distro("alpine", "Alpine 3.24 (minirootfs, ringan)",
-                    "https://dl-cdn.alpinelinux.org/alpine/latest-stable/releases/aarch64/alpine-minirootfs-3.24.2-aarch64.tar.gz",
+                    // url kosong -> pakai rootfs.tar.gz yang dibundel di assets (offline aman)
+                    "",
                     "", 4L * 1024 * 1024),
             new Distro("ubuntu-2404", "Ubuntu 24.04 LTS (base)",
                     "https://cdimage.ubuntu.com/ubuntu-base/releases/24.04/release/ubuntu-base-24.04.5-base-arm64.tar.gz",

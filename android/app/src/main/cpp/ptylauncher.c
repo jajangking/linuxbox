@@ -18,6 +18,7 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/un.h>
 #include <sys/wait.h>
@@ -119,11 +120,18 @@ static void relay(int master, int ctrl_fd) {
     }
 }
 
+static const int chlvl = 1;
+
 int main(int argc, char **argv) {
     if (argc < 2) {
         fprintf(stderr, "usage: ptylauncher <cmd> [args...]\n");
         return 2;
     }
+    char cwd_buf[1024] = "";
+    if (getcwd(cwd_buf, sizeof(cwd_buf) - 1) == NULL) {
+        snprintf(cwd_buf, sizeof(cwd_buf), "<getcwd err %s>", strerror(errno));
+    }
+    fprintf(stderr, "[ptylauncher] cwd=%s argv1=%s\n", cwd_buf, argv[1]);
     const char *ctrl_path = getenv("LINUXBOX_CTRL_SOCK");
     int master, slave;
     if (openpty(&master, &slave, NULL, NULL, NULL) != 0) {
@@ -160,6 +168,55 @@ int main(int argc, char **argv) {
         dup2(slave, STDERR_FILENO);
         close(slave);
         close(master);
+        char ccwd[1024] = "";
+        if (getcwd(ccwd, sizeof(ccwd) - 1) == NULL) {
+            snprintf(ccwd, sizeof(ccwd), "<err %s>", strerror(errno));
+        }
+        char rl[1024] = "";
+        ssize_t rl_n = readlink("/proc/self/cwd", rl, sizeof(rl) - 1);
+        if (rl_n < 0) {
+            snprintf(rl, sizeof(rl), "<err %s>", strerror(errno));
+        } else {
+            rl[rl_n] = '\0';
+        }
+        const char *td = getenv("TMPDIR");
+        const char *pw = getenv("PWD");
+        fprintf(stderr, "[child] getcwd=%s readlink=%s TMPDIR=%s PWD=%s\n",
+                ccwd, rl, td ? td : "(unset)", pw ? pw : "(unset)");
+        if (chlvl > 0) {
+            char b1[1024];
+            const char *try_paths[] = {
+                "/data/data/com.linuxbox/files",
+                "/data/data/com.linuxbox/files/rootfs-alpine",
+                "/data/data/com.linuxbox/files/rootfs-alpine/bin",
+                "/data/data/com.linuxbox/files/rootfs-alpine/bin/busybox",
+                NULL
+            };
+            for (int i = 0; try_paths[i]; i++) {
+                struct stat st;
+                int rc = stat(try_paths[i], &st);
+                fprintf(stderr, "[diag] stat(%s) rc=%d errno=%d\n",
+                        try_paths[i], rc, rc == 0 ? 0 : errno);
+            }
+            char rp[1024];
+            const char *rr = realpath("/data/data/com.linuxbox/files/rootfs-alpine",
+                                      rp);
+            fprintf(stderr, "[diag] realpath(rootfs)=%s errno=%d\n",
+                    rr ? rp : "(fail)", rr ? 0 : errno);
+            if (chdir("/data/data/com.linuxbox/files/rootfs-alpine") == 0
+                && getcwd(b1, sizeof(b1)) != NULL) {
+                fprintf(stderr, "[diag] chdir+getcwd=%s\n", b1);
+            } else {
+                fprintf(stderr, "[diag] chdir rootfs failed errno=%d\n", errno);
+            }
+            const char *mk = "/data/data/com.linuxbox/files/.proot_diag";
+            if (mkdir(mk, 0700) == 0) {
+                fprintf(stderr, "[diag] mkdir %s OK\n", mk);
+                rmdir(mk);
+            } else {
+                fprintf(stderr, "[diag] mkdir %s errno=%d\n", mk, errno);
+            }
+        }
         execvp(argv[1], &argv[1]);
         fprintf(stderr, "exec %s: %s\n", argv[1], strerror(errno));
         _exit(127);
