@@ -134,8 +134,83 @@ public final class ProotSession {
      * rootfs-nya glibc, selain itu proot klasik.
      */
     public static Engine engineFor(String nativeLibDir, String distroId) {
-        if (hasProroot(nativeLibDir) && !isMusl(distroId)) return Engine.PROROOT;
+        return engineFor(nativeLibDir, distroId, null);
+    }
+
+    /**
+     * Pilih mesin dengan pengetahuan soal rootfs: proroot hanya untuk glibc
+     * yang masih didukung. proroot v1.2.8 tidak punya offset table untuk glibc
+     * baru (mis. 2.43/Ubuntu 26.04) — ia melaporkan "no offset table for glibc
+     * X.XX, patches skipped" lalu SIGSEGV saat eksekusi. Verifikasi: glibc 2.39
+     * (Ubuntu 24.04) jalan, 2.43 crash.
+     */
+    public static Engine engineFor(String nativeLibDir, String distroId, File rootfs) {
+        if (hasProroot(nativeLibDir) && !isMusl(distroId)
+                && (rootfs == null || prorootSupportsGlibc(rootfs))) return Engine.PROROOT;
         return Engine.PROOT;
+    }
+
+    /** Minor glibc tertinggi yang masih didukung proroot (2.<max>). */
+    static final int PROROOT_GLIBC_MAX_MINOR = 41;
+
+    /** true kalau glibc di rootfs masih didukung proroot (atau tak terdeteksi). */
+    static boolean prorootSupportsGlibc(File rootfs) {
+        int[] v = glibcVersion(rootfs);
+        return v == null || v[0] != 2 || v[1] <= PROROOT_GLIBC_MAX_MINOR;
+    }
+
+    /**
+     * Versi glibc dari symbol versi "GLIBC_x.y" di libc.so.6 (binary, teks
+     * versi disisipkan sebagai string). null kalau tidak ketemu (bukan glibc
+     * atau file hilang).
+     */
+    static int[] glibcVersion(File rootfs) {
+        int maj = 0, min = 0;
+        boolean found = false;
+        for (String c : new String[]{
+                "lib/aarch64-linux-gnu/libc.so.6",
+                "lib/x86_64-linux-gnu/libc.so.6",
+                "lib/arm-linux-gnueabihf/libc.so.6",
+                "usr/lib/aarch64-linux-gnu/libc.so.6",
+                "usr/lib/x86_64-linux-gnu/libc.so.6",
+        }) {
+            int[] v = scanLibc(new File(rootfs, c));
+            if (v == null) continue;
+            if (!found || v[0] > maj || (v[0] == maj && v[1] > min)) {
+                maj = v[0]; min = v[1]; found = true;
+            }
+        }
+        return found ? new int[]{maj, min} : null;
+    }
+
+    /** Scan awal file libc (1MB cukup; string versi di awal) untuk GLIBC_x.y. */
+    private static int[] scanLibc(File f) {
+        try (java.io.InputStream in =
+                     new java.io.BufferedInputStream(new java.io.FileInputStream(f))) {
+            byte[] buf = new byte[65536];
+            java.io.ByteArrayOutputStream tmp = new java.io.ByteArrayOutputStream();
+            int max = 1 << 20, sofar = 0, n;
+            while (sofar < max && (n = in.read(buf)) > 0) {
+                tmp.write(buf, 0, n);
+                sofar += n;
+            }
+            String s = new String(tmp.toByteArray(),
+                    java.nio.charset.StandardCharsets.ISO_8859_1);
+            int maj = 0, min = 0;
+            boolean found = false;
+            java.util.regex.Matcher m = java.util.regex.Pattern
+                    .compile("GLIBC_(\\d+)\\.(\\d+)").matcher(s);
+            while (m.find()) {
+                int a = Integer.parseInt(m.group(1));
+                int b = Integer.parseInt(m.group(2));
+                if (!found || a > maj || (a == maj && b > min)) {
+                    maj = a; min = b; found = true;
+                }
+            }
+            return found ? new int[]{maj, min} : null;
+        } catch (java.io.IOException e) {
+            return null;
+        }
     }
 
     /** Setiap distro punya direktori sendiri: files/rootfs-<id>. */

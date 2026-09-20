@@ -490,7 +490,7 @@ public final class SessionManager {
         // forcedEngine diisi kalau proroot sudah terbukti gagal di sesi ini.
         ProotSession.Engine engine = ProotSession.Engine.PROOT.id.equals(s.forcedEngine)
                 ? ProotSession.Engine.PROOT
-                : ProotSession.engineFor(nativeLibDir, s.distroId);
+                : ProotSession.engineFor(nativeLibDir, s.distroId, rootfs);
         s.engine = engine.id;
         return PtyHelper.start(s.id, filesDir, nativeLibDir, rootfs,
                 ProotSession.buildCommand(engine, nativeLibDir, rootfs, extraBinds(ctx)),
