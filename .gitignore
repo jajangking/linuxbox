@@ -16,3 +16,9 @@ __pycache__/
 # binary native hasil staging build (jangan masuk git)
 android/app/src/main/assets/bin/
 android/app/src/main/jniLibs/
+
+# Pengujian browser
+node_modules/
+.cache/
+test-results/
+playwright-report/

@@ -55,7 +55,7 @@
   #spacer { flex: 1 1 auto; }
 
   /* ---- terminal ---- */
-  #term { flex: 1 1 auto; min-height: 0; padding: 6px; }
+  #term { flex: 1 1 auto; min-height: 0; padding: 6px; overflow: hidden; }
   #term .xterm-viewport {
     height: 100% !important; overflow-y: auto;
     -webkit-overflow-scrolling: touch;
@@ -104,18 +104,43 @@
   #keys button.on {
     background: var(--accent); color: #0b0e14; border-color: var(--accent);
   }
-  #copyBtn {
+  #selectionActions {
     position: fixed; right: 14px; bottom: 96px; z-index: 15;
-    display: none; padding: 9px 18px; background: var(--accent); color: #0b0e14;
+    display: none; gap: 6px; padding: 5px; background: var(--bar); color: #0b0e14;
     border: none; border-radius: 20px; font: 13px monospace; font-weight: 700;
     box-shadow: 0 2px 12px rgba(0, 0, 0, .5);
   }
-  #copyBtn.show { display: block; }
+  #selectionActions.show { display: flex; }
+  #selectionActions button {
+    min-height: 40px; padding: 6px 12px; border: 0; border-radius: 16px;
+    background: var(--accent); color: #0b0e14; font-weight: 700;
+  }
+  .selection-handle {
+    position: fixed; display: none; width: 44px; height: 44px; z-index: 14;
+    padding: 0; border: 0; background: transparent; touch-action: none;
+    user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
+    transform: translateX(-50%);
+  }
+  .selection-handle::before {
+    content: ''; position: absolute; top: 0; left: 21px;
+    width: 2px; height: 12px; background: var(--accent);
+  }
+  .selection-handle::after {
+    content: ''; position: absolute; top: 10px; left: 13px;
+    width: 18px; height: 18px; border-radius: 50%; background: var(--accent);
+    box-shadow: 0 1px 4px #000;
+  }
+  /* Awal di atas teks, akhir di bawah: hit area tidak bertumpuk meski
+     hanya satu karakter dipilih di tepi layar. */
+  #selectionStart { transform: translate(-50%, -100%); }
+  #selectionStart::before { top: auto; bottom: 0; }
+  #selectionStart::after { top: auto; bottom: 10px; }
+  .selection-handle::before { transform: translateX(var(--stem-offset, 0px)); }
   #flash {
     position: fixed; left: 50%; bottom: 132px; transform: translateX(-50%);
     z-index: 16; display: none; padding: 7px 14px; background: #1b2230;
     color: var(--fg); border: 1px solid var(--line); border-radius: 5px;
-    font: 12px monospace;
+    font: 12px monospace; pointer-events: none;
   }
   #flash.show { display: block; }
   #search {
@@ -161,7 +186,10 @@
     <span id="searchCount"></span>
     <button class="act" id="searchClose">×</button>
   </div>
-  <div id="term"></div>
+  <div id="term">
+    <div id="selectionStart" class="selection-handle" aria-label="Awal seleksi"></div>
+    <div id="selectionEnd" class="selection-handle" aria-label="Akhir seleksi"></div>
+  </div>
   <div id="keys">
     <button data-key="esc">esc</button>
     <button data-key="tab">tab</button>
@@ -178,7 +206,11 @@
     <span id="state" class="wait">menyambung…</span>
     <span id="info"></span>
   </div>
-  <button id="copyBtn">Salin</button>
+  <div id="selectionActions" role="group" aria-label="Seleksi teks">
+    <button id="copyBtn">Salin</button>
+    <button id="cancelSelection">Batal</button>
+    <button id="typeBtn">Ketik</button>
+  </div>
   <div id="flash"></div>
 </div>
 <div id="overlay"><div class="spinner"></div><div class="big" id="ovText">Menyambung…</div><div class="small" id="ovHint"></div></div>
@@ -271,6 +303,10 @@
   }
   function hideOverlay() { overlay.classList.remove('show'); }
   function doFit() {
+    // xterm 6 menghapus seleksi saat jumlah baris berubah. Tunda resize PTY
+    // selama memilih: animasi keyboard menutup tidak boleh menghapus highlight
+    // atau mengubah baris buffer di bawah jari. Fit kembali setelah selesai.
+    if (touchSelection) { syncSelection(); return; }
     try { if (fit) fit.fit(); } catch (e) {}
     sendSize();
   }
@@ -319,6 +355,7 @@
       infoEl.textContent = sessions.length + ' sesi · ' + fontSize + 'px';
       // sesi aktif berubah (mis. sesi lama hilang setelah service restart)
       if (sessionId !== had) {
+        finishSelection();
         term.reset();
         connect();
       }
@@ -375,7 +412,7 @@
 
   function killSession(id) {
     api('/api/sessions/' + id + '/kill', { method: 'POST' }).then(function () {
-      if (id === sessionId) { term.reset(); sessionId = null; }
+      if (id === sessionId) { finishSelection(); term.reset(); sessionId = null; }
       refreshSessions().then(function () {
         if (!sessionId && sessions.length) switchSession(sessions[0].id);
         else if (!sessions.length) newSession();
@@ -394,6 +431,7 @@
     if (id === sessionId) return;
     closeSockets();
     sessionId = id;
+    finishSelection();
     term.reset();
     renderTabs();
     connect();
@@ -540,9 +578,9 @@
   term.onData(function (d) {
     if (ws && ws.readyState === WebSocket.OPEN) ws.send(d);
   });
-  document.addEventListener('click', function (e) {
-    // jangan rebut fokus kalau user sedang menekan tab/tombol
-    if (e.target.closest('#tabs, #actions, #keys')) return;
+  // Fokus hanya untuk klik terminal, bukan klik Salin/Cari/status di dokumen.
+  termEl.addEventListener('click', function (e) {
+    if (Date.now() < suppressMouseUntil || touchSelection || term.hasSelection()) return;
     term.focus();
   });
   document.addEventListener('visibilitychange', function () {
@@ -553,113 +591,209 @@
   });
 
   // ---------- gestur sentuh: scroll & seleksi ----------
-  // xterm 6 punya lapisan Gesture sendiri di document (preventDefault) yang
-  // mematikan scroll di WebView Android -> dibekukan (stopPropagation capture)
-  // lalu ditangani manual. Pola:
-  //   tap (tanpa gerak)       -> click -> keyboard terbuka
-  //   geser cepat             -> term.scrollLines, keyboard ditutup
-  //   tahan ~0,4 dtk lalu tarik -> seleksi MANUAL by-cell: xterm yang mengecat
-  //     highlight birunya sendiri (tidak bergantung seleksi native WebView yang
-  //     di sini cuma memunculkan menu "Tempel" / highlight tak terlihat).
-  // Setelah lepas, tombol "Salin" muncul kalau ada teks terseleksi.
-  var LINE_H = 20, CELL_W = 9;
-  function cellDims() {
-    try {
-      var scr = termEl.querySelector('.xterm-screen');
-      var r = scr.getBoundingClientRect();
-      if (r.width > 0 && r.height > 0 && term.rows > 0 && term.cols > 0) {
-        CELL_W = r.width / term.cols; LINE_H = r.height / term.rows;
-        return true;
-      }
-    } catch (e) {}
-    try {
-      var fs = term.options.fontSize || 14;
-      LINE_H = Math.ceil(fs * 1.35); CELL_W = Math.ceil(fs * 0.62);
-    } catch (e2) {}
-    return false;
+  // xterm mengecat highlight, tetapi tidak menyediakan handle seleksi Android.
+  // Ambil alih touch sebelum Gesture xterm; jangan biarkan synthetic mouse/click
+  // memfokuskan textarea atau menghapus seleksi sesudah jari dilepas.
+  var selectionActions = document.getElementById('selectionActions');
+  var startHandle = document.getElementById('selectionStart');
+  var endHandle = document.getElementById('selectionEnd');
+  var touchSelection = false, suppressMouseUntil = 0;
+  var gesture = null, holdTimer = null;
+
+  function geometry() {
+    var r = termEl.querySelector('.xterm-screen').getBoundingClientRect();
+    return { rect: r, cw: r.width / term.cols, lh: r.height / term.rows };
   }
-  var gsMoved = false;
-  if ('ontouchstart' in window) {
+  function cellAt(x, y) {
+    var g = geometry();
+    var col = Math.max(0, Math.min(term.cols - 1, Math.floor((x - g.rect.left) / g.cw)));
+    var row = Math.max(0, Math.min(term.rows - 1, Math.floor((y - g.rect.top) / g.lh)));
+    // term.select memakai baris BUFFER, bukan baris layar/viewport.
+    return (term.buffer.active.viewportY + row) * term.cols + col;
+  }
+  function selectionRange() {
+    var p = term.getSelectionPosition();
+    return p ? { start: p.start.y * term.cols + p.start.x,
+                 end: p.end.y * term.cols + p.end.x } : null;
+  }
+  function selectRange(start, end) {
+    term.select(start % term.cols, Math.floor(start / term.cols), end - start);
+    syncSelection();
+  }
+  function blurEditable() {
+    var ae = document.activeElement;
+    if (ae && ae.blur) ae.blur();
+  }
+  function selectionInput(locked) {
+    // Cegah IME muncul walaupun xterm mencoba memfokuskan textarea lagi.
+    var ta = term.textarea;
+    if (!ta) return;
+    ta.readOnly = locked;
+    if (locked) { ta.setAttribute('inputmode', 'none'); blurEditable(); }
+    else ta.removeAttribute('inputmode');
+  }
+  function finishSelection() {
+    touchSelection = false;
+    gesture = null;
+    clearTimeout(holdTimer);
+    selectionInput(false);
+    term.clearSelection();
+    syncSelection();
+    doFit();
+  }
+  function syncSelection() {
+    var p = term.getSelectionPosition();
+    selectionActions.classList.toggle('show', !!p);
+    startHandle.style.display = endHandle.style.display = 'none';
+    if (!p) {
+      if (touchSelection) {
+        touchSelection = false; selectionInput(false); setTimeout(doFit, 0);
+      }
+      return;
+    }
+    if (!touchSelection) {
+      selectionActions.style.top = ''; selectionActions.style.bottom = '96px';
+      return;
+    }
+    var g = geometry(), viewport = term.buffer.active.viewportY;
+    var bounds = termEl.getBoundingClientRect();
+    function place(handle, point, isEnd) {
+      var x = point.x, row = point.y - viewport;
+      // Ujung eksklusif kolom 0 digambar sesudah sel terakhir baris sebelumnya.
+      if (isEnd && x === 0) { x = term.cols; row--; }
+      if (row < 0 || row >= term.rows || g.rect.top + (row + 1) * g.lh > bounds.bottom) return;
+      var left = g.rect.left + x * g.cw;
+      var center = Math.max(22, Math.min(window.innerWidth - 22, left));
+      handle.style.setProperty('--stem-offset', (left - center) + 'px');
+      handle.style.left = center + 'px';
+      handle.style.top = (g.rect.top + (row + (isEnd ? 1 : 0)) * g.lh) + 'px';
+      handle.style.display = 'block';
+    }
+    place(startHandle, p.start, false);
+    place(endHandle, p.end, true);
+    // Toolbar mengambang tidak boleh menutupi hit area marker di baris bawah.
+    selectionActions.style.top = '';
+    selectionActions.style.bottom = '96px';
+    var actionsBox = selectionActions.getBoundingClientRect();
+    var handles = [startHandle, endHandle].filter(function (h) { return h.style.display !== 'none'; });
+    function overlapsHandle(top) {
+      return handles.some(function (h) {
+        var r = h.getBoundingClientRect();
+        return actionsBox.left < r.right && actionsBox.right > r.left &&
+            top < r.bottom && top + actionsBox.height > r.top;
+      });
+    }
+    if (overlapsHandle(actionsBox.top)) {
+      for (var top = bounds.top + 4; top + actionsBox.height < bounds.bottom; top += 48) {
+        if (!overlapsHandle(top)) {
+          selectionActions.style.bottom = 'auto';
+          selectionActions.style.top = top + 'px';
+          break;
+        }
+      }
+    }
+  }
+  term.onSelectionChange(syncSelection);
+  term.onScroll(syncSelection);
+  term.onRender(syncSelection);
+  term.onResize(syncSelection);
+  window.addEventListener('resize', syncSelection);
+  if (window.visualViewport) window.visualViewport.addEventListener('resize', syncSelection);
+  termEl.addEventListener('focusin', function () {
+    if (touchSelection) selectionInput(true);
+  });
+  ['mousedown', 'mouseup', 'click', 'dblclick', 'contextmenu'].forEach(function (name) {
+    termEl.addEventListener(name, function (e) {
+      if (Date.now() < suppressMouseUntil || touchSelection) {
+        e.preventDefault(); e.stopImmediatePropagation();
+      }
+    }, true);
+  });
+
+  if ('ontouchstart' in window || navigator.maxTouchPoints > 0) {
     document.documentElement.classList.add('touch');
-    var gsX = 0, gsY = 0, gsMode = 'wait', gsSelFrom = null, gsHoldTimer = null;
-    var blurEditable = function () {
-      var ae = document.activeElement;
-      if (ae && ae.blur && ae !== document.body && ae !== document.documentElement) ae.blur();
-    };
-    function cellAt(x, y) {
-      cellDims();
-      var scr = termEl.querySelector('.xterm-screen');
-      var r = scr.getBoundingClientRect();
-      var col = Math.floor((x - r.left) / CELL_W);
-      var row = Math.floor((y - r.top) / LINE_H);
-      col = Math.max(0, Math.min(col, term.cols - 1));
-      row = Math.max(0, Math.min(row, term.rows - 1));
-      return { col: col, row: row };
-    }
-    function extendSel(cur) {
-      var a = gsSelFrom.row * term.cols + gsSelFrom.col;
-      var b = cur.row * term.cols + cur.col;
-      var o = Math.min(a, b), e = Math.max(a, b);
-      term.select(o % term.cols, Math.floor(o / term.cols), e - o + 1);
-    }
-    var ges = termEl;
-    ges.addEventListener('touchstart', function (e) {
+    function consume(e) {
+      if (e.cancelable) e.preventDefault();
       e.stopPropagation();
-      var t = e.touches[0];
-      gsX = t.clientX; gsY = t.clientY;
-      gsMode = 'wait'; gsSelFrom = null; gsMoved = false;
-      if (term.getSelection()) term.clearSelection();
-      blurEditable();   // cabut fokus textarea: keyboard & menu "Tempel" mati
-      if (gsHoldTimer) { clearTimeout(gsHoldTimer); gsHoldTimer = null; }
-      gsHoldTimer = setTimeout(function () {
-        if (gsMode !== 'wait') return;
-        gsMode = 'select';
-        gsSelFrom = cellAt(gsX, gsY);
-        term.select(gsSelFrom.col, gsSelFrom.row, 1);
-        try { navigator.vibrate && navigator.vibrate(12); } catch (e3) {}
-      }, 390);
-    }, { capture: true, passive: true });
-    ges.addEventListener('touchmove', function (e) {
-      e.stopPropagation();
-      if (gsMode === 'select') {
-        e.preventDefault();
-        extendSel(cellAt(e.touches[0].clientX, e.touches[0].clientY));
+      suppressMouseUntil = Date.now() + 800;
+    }
+    termEl.addEventListener('touchstart', function (e) {
+      consume(e);
+      clearTimeout(holdTimer);
+      if (e.touches.length !== 1) { gesture = null; return; }
+      var t = e.touches[0], range = selectionRange();
+      gesture = { id: t.identifier, x: t.clientX, y: t.clientY, lastY: t.clientY,
+                  anchor: cellAt(t.clientX, t.clientY), mode: 'wait' };
+      var handle = e.target.closest('.selection-handle');
+      if (handle && range) {
+        gesture.mode = handle === startHandle ? 'start' : 'end';
+        // Simpan offset jari agar marker tidak meloncat saat mulai ditarik.
+        var p = term.getSelectionPosition();
+        var point = handle === startHandle ? p.start : p.end;
+        var g = geometry();
+        var row = point.y - term.buffer.active.viewportY, col = point.x;
+        if (handle === endHandle && col === 0) { col = term.cols; row--; }
+        gesture.dx = t.clientX - (g.rect.left + col * g.cw);
+        gesture.dy = t.clientY - (g.rect.top + (row + 0.5) * g.lh);
+        selectionInput(true);
         return;
       }
+      // Sentuhan baru tidak menghapus seleksi yang aktif atau membuka keyboard.
+      if (touchSelection) return;
+      holdTimer = setTimeout(function () {
+        if (!gesture || gesture.mode !== 'wait') return;
+        gesture.mode = 'select';
+        touchSelection = true;
+        selectionInput(true);
+        selectRange(gesture.anchor, gesture.anchor + 1);
+        try { if (navigator.vibrate) navigator.vibrate(12); } catch (ignore) {}
+      }, 390);
+    }, { capture: true, passive: false });
+    termEl.addEventListener('touchmove', function (e) {
+      consume(e);
+      if (!gesture || e.touches.length !== 1) return;
       var t = e.touches[0];
-      var dy = t.clientY - gsY;
-      if (Math.abs(dy) < 8) return;
-      if (gsHoldTimer) { clearTimeout(gsHoldTimer); gsHoldTimer = null; }
-      gsMoved = true;
-      blurEditable();   // mulai geser: keyboard ditutup
-      e.preventDefault();
-      var lines = Math.round(dy / LINE_H);
-      if (lines !== 0) { term.scrollLines(-lines); gsY = t.clientY; }
-    }, { capture: true, passive: false });
-    ges.addEventListener('touchend', function (e) {
-      e.stopPropagation();
-      if (gsHoldTimer) { clearTimeout(gsHoldTimer); gsHoldTimer = null; }
-      if (gsMode === 'select') {
-        e.preventDefault();   // jangan jadi click -> keyboard
-        var sel = term.getSelection();
-        if (sel && sel.trim()) copyBtn.classList.add('show');
-        else copyBtn.classList.remove('show');
-      } else if (gsMoved) {
-        e.preventDefault();
+      if (t.identifier !== gesture.id) return;
+      var mode = gesture.mode;
+      if (mode === 'start' || mode === 'end') {
+        var g = geometry(), range = selectionRange();
+        if (!range) return;
+        var x = t.clientX - gesture.dx, y = t.clientY - gesture.dy;
+        // Batas eksklusif boleh col == cols agar karakter terakhir bisa disalin.
+        var col = Math.max(0, Math.min(term.cols, Math.round((x - g.rect.left) / g.cw)));
+        var row = Math.max(0, Math.min(term.rows - 1, Math.floor((y - g.rect.top) / g.lh)));
+        var pos = (term.buffer.active.viewportY + row) * term.cols + col;
+        if (mode === 'start') range.start = Math.min(pos, range.end - 1);
+        else range.end = Math.max(pos, range.start + 1);
+        selectRange(range.start, range.end);
+        return;
       }
-      gsMode = 'wait';
-      gsMoved = false;
-    }, { capture: true, passive: false });
-    ges.addEventListener('touchcancel', function (e) {
-      e.stopPropagation();
-      if (gsHoldTimer) { clearTimeout(gsHoldTimer); gsHoldTimer = null; }
-      if (gsMode === 'select') {
-        var sel = term.getSelection();
-        if (sel && sel.trim()) copyBtn.classList.add('show');
+      if (mode === 'select') {
+        var pos = cellAt(t.clientX, t.clientY);
+        selectRange(Math.min(gesture.anchor, pos), Math.max(gesture.anchor, pos) + 1);
+        return;
       }
-      gsMode = 'wait';
-      gsMoved = false;
+      if (mode === 'wait' && Math.max(Math.abs(t.clientX - gesture.x), Math.abs(t.clientY - gesture.y)) < 8) return;
+      clearTimeout(holdTimer);
+      gesture.mode = 'scroll';
+      blurEditable();
+      var lines = Math.trunc((gesture.lastY - t.clientY) / geometry().lh);
+      if (lines) { term.scrollLines(lines); gesture.lastY -= lines * geometry().lh; }
     }, { capture: true, passive: false });
+    function endTouch(e) {
+      consume(e);
+      clearTimeout(holdTimer);
+      var tap = gesture && gesture.mode === 'wait' && !touchSelection && e.type === 'touchend';
+      gesture = null;
+      if (tap) {
+        term.clearSelection();
+        selectionInput(false);
+        term.focus(); // hanya tap disengaja yang membuka keyboard
+      }
+      syncSelection();
+    }
+    termEl.addEventListener('touchend', endTouch, { capture: true, passive: false });
+    termEl.addEventListener('touchcancel', endTouch, { capture: true, passive: false });
   }
 
   // ---------- salin ke clipboard ----------
@@ -682,6 +816,7 @@
     var ta = document.createElement('textarea');
     ta.value = txt;
     ta.setAttribute('readonly', '');
+    ta.setAttribute('inputmode', 'none');
     ta.style.cssText = 'position:fixed;top:0;left:0;width:1em;height:1em;opacity:.01;z-index:-1';
     document.body.appendChild(ta);
     ta.focus(); ta.select();
@@ -689,11 +824,16 @@
     var ok = false;
     try { ok = document.execCommand('copy'); } catch (e) {}
     document.body.removeChild(ta);
-    try { term.clearSelection(); } catch (e) {}
-    copyBtn.classList.remove('show');
+    // Jangan buang seleksi bila clipboard ditolak browser.
+    if (ok) finishSelection();
     flash(ok ? 'tersalin' : 'gagal menyalin');
   }
+  selectionActions.addEventListener('mousedown', function (e) { e.preventDefault(); });
   copyBtn.addEventListener('click', function () { copyText(selText()); });
+  document.getElementById('cancelSelection').addEventListener('click', finishSelection);
+  document.getElementById('typeBtn').addEventListener('click', function () {
+    finishSelection(); term.focus();
+  });
 
 // ---------- pencarian di terminal ----------
   var searchBar = document.getElementById('search');
@@ -711,6 +851,7 @@
   function toggleSearch(show) {
     var willShow = (typeof show === 'boolean') ? show : !searchBar.classList.contains('show');
     if (willShow) {
+      finishSelection();
       searchBar.classList.add('show');
       searchInput.focus();
       searchInput.select();
@@ -737,7 +878,7 @@
   });
 
   document.getElementById('btnNew').addEventListener('click', newSession);
-  document.getElementById('btnClear').addEventListener('click', function () { term.clear(); });
+  document.getElementById('btnClear').addEventListener('click', function () { finishSelection(); term.clear(); });
   document.getElementById('btnReconnect').addEventListener('click', function () {
     closeSockets();
     retries = 0;
@@ -758,6 +899,8 @@
       '• Kalau shell keluar (exit/crash), sesi otomatis hidup lagi.\n' +
       '• A+/A− mengubah ukuran huruf, Bersihkan mengosongkan layar saja.\n' +
       '• Cari (Ctrl-F) untuk mencari di scrollback; tautan bisa diklik.\n' +
+      '• Tahan teks lalu tarik untuk memilih; geser marker awal/akhir untuk menyesuaikan.\n' +
+      '• Salin menyalin seleksi, Batal menutupnya, Ketik membuka keyboard lagi.\n' +
       '• Pilihan distro di sebelah "+ Sesi" menentukan distro sesi baru,\n' +
       '  jadi satu tab bisa alpine dan tab lain ubuntu.\n' +
       '• status "sdcard ✓" berarti /sdcard di-bind ke dalam guest.\n\n' +

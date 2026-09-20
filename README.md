@@ -279,11 +279,49 @@ open(dst, "wb").write(AESGCM(key).decrypt(raw[20:32], raw[32:], None))
   `@xterm/addon-search`; tautan `http(s)://` bisa diklik
   (`@xterm/addon-web-links`). Keduanya opsional — tanpa berkas addon, terminal
   tetap berjalan normal.
+- **Salin sebagian teks di HP**: tahan teks sekitar 0,4 detik lalu tarik.
+  Marker awal (di atas teks) dan akhir (di bawah teks) bisa ditarik lagi untuk
+  mempersempit/memperluas seleksi. Seleksi tetap ada saat jari dilepas atau
+  layar digeser, termasuk pada scrollback. Tekan **Salin** untuk menyalin,
+  **Batal** untuk menutup seleksi, atau **Ketik** untuk membuka keyboard lagi.
+  Menyeleksi/menyalin tidak otomatis membuka keyboard; jika clipboard ditolak
+  browser, seleksi tetap tersedia untuk dicoba ulang. Resize grid/PTY ditunda
+  selama seleksi aktif agar animasi penutupan keyboard tidak menghapus seleksi.
 - Tombol: bersihkan layar, `A−`/`A+` ukuran huruf, sambung ulang, bantuan.
 - Di HP muncul baris tombol sentuh (esc, tab, `^C`, `^D`, `^Z`, panah, `/`, `|`)
   karena keyboard virtual tidak punya tombol itu.
 - Indikator status di bawah: terhubung / menyambung ulang / server tidak
   merespons, plus jumlah sesi, distro, dan shell.
+
+### Pengujian seleksi terminal
+
+Pengujian browser memakai xterm 6 dan FitAddon asli, dengan backend PTY dan
+clipboard pengganti (tidak memerlukan Android SDK atau sesi Linux aktif):
+
+```bash
+npm ci
+npx playwright install --with-deps chromium
+npm run test:web
+# Opsional: gunakan Chromium yang sudah terpasang
+# CHROMIUM_PATH=/path/to/chromium npm run test:web
+```
+
+Cakupan: long-press, seleksi terbalik/lintas baris, kedua marker termasuk satu
+karakter di tepi layar, scrollback, scroll saat seleksi, pembatalan gestur,
+kegagalan clipboard, fokus Cari/Ketik, resize saat keyboard menutup, perubahan
+font, ganti sesi/bersihkan, dan seleksi mouse desktop.
+
+Tetap lakukan uji pada HP setelah rebuild APK dan muat ulang halaman terminal:
+1. Buka keyboard, tahan sebagian output, lalu tarik: keyboard menutup dan
+   highlight beserta kedua marker tetap muncul setelah animasi selesai.
+2. Tarik masing-masing marker, tekan **Salin**, lalu tempel di aplikasi lain:
+   hanya teks terpilih yang tersalin dan keyboard tidak muncul saat menyalin.
+3. Ulangi pada output lama di scrollback dan seleksi lintas baris.
+4. **Batal** menutup seleksi tanpa keyboard; **Ketik** membuka keyboard dan
+   input terminal kembali normal.
+
+Emulasi browser hanya memverifikasi fokus/input dan perubahan viewport, bukan
+IME/clipboard sistem Android yang sebenarnya.
 
 ### Kenapa `targetSdk` dipatok 28
 
