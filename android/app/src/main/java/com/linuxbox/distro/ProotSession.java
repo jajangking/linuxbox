@@ -131,11 +131,16 @@ public final class ProotSession {
         env.put("TERM", "xterm-256color");
         env.put("COLORTERM", "truecolor");
         env.put("LANG", "C.UTF-8");
-        // PENTING: proot membuat temp dir untuk probe f2fs SEBELUM guest rootfs
-        // aktif, jadi TMPDIR harus path host yang benar-benar ada dan bisa
-        // ditulis. "/tmp" tidak ada di Android -> proot warning "Unable to create
-        // temp directory for f2fs bug probe" lalu gagal chdir/execve.
-        env.put("TMPDIR", tmpDir(filesDir).getAbsolutePath());
+        // PENTING: proot mengambil direktori temp dari env PROOT_TMP_DIR
+        // (src/path/temp.c: getenv("PROOT_TMP_DIR")), BUKAN TMPDIR. Kalau tidak
+        // diset ia memakai P_tmpdir yang di Termux berisi
+        // /data/data/com.termux/files/usr/tmp -> "can't canonicalize ..." lalu
+        // "Unable to create temp directory for f2fs bug probe". Keduanya harus
+        // path host yang benar-benar ada dan bisa ditulis (bukan "/tmp").
+        String hostTmp = tmpDir(filesDir).getAbsolutePath();
+        env.put("PROOT_TMP_DIR", hostTmp);
+        // TMPDIR tetap dikirim untuk program guest yang memakainya.
+        env.put("TMPDIR", hostTmp);
         env.put("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
         env.put("LD_LIBRARY_PATH", nativeLibDir);
         return env;

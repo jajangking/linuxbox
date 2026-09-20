@@ -79,12 +79,12 @@ echo
 for V in A B C; do
   echo "======== VARIAN \$V ========"
   case \$V in
-    A) EXTRA=""                 ; TD="/tmp" ;;                       # kondisi lama
-    B) EXTRA=""                 ; TD="/data/data/com.linuxbox/files/tmp" ;;  # fix TMPDIR saja
-    C) EXTRA="--cwd=/"          ; TD="/data/data/com.linuxbox/files/tmp" ;;  # fix TMPDIR + --cwd=/
+    A) EXTRA=""        ; TD="/tmp" ;;                                     # kondisi lama
+    B) EXTRA=""        ; TD="/data/data/com.linuxbox/files/tmp" ;;         # + PROOT_TMP_DIR
+    C) EXTRA="--cwd=/" ; TD="/data/data/com.linuxbox/files/tmp" ;;         # + --cwd=/
   esac
   cd /data/data/com.linuxbox/files || exit 1
-  TMPDIR=\$TD LD_LIBRARY_PATH=\$BASE/lib/arm64 \\
+  TMPDIR=\$TD PROOT_TMP_DIR=\$TD LD_LIBRARY_PATH=\$BASE/lib/arm64 \\
   \$BASE/lib/arm64/libproot.so \\
       --rootfs=\$ROOTFS_ABS --link2symlink \\
       -b /proc -b /sys -b /dev --kill-on-exit \$EXTRA /bin/sh -l \\
@@ -105,7 +105,36 @@ sh_adb "run-as $PKG sh files/lb_inner.sh ${ROOTFS#files/}" 2>&1 | tee -a "$OUT"
 fi
 hr
 
-log "== 6. LOGCAT (com.linuxbox, 200 baris terakhir) =="
+log "== 6. UJI W^X: bolehkah app mengeksekusi binary di filesDir? =="
+log "   (Android 10+: app targetSdk >= 29 DILARANG execve berkas app_data_file)"
+sh_adb "run-as $PKG sh -c 'cat /proc/self/attr/current'" | tee -a "$OUT"
+sh_adb "run-as $PKG cp /system/bin/toybox files/toybox_probe 2>&1; run-as $PKG chmod 755 files/toybox_probe 2>&1" | tee -a "$OUT"
+sh_adb "run-as $PKG sh -c './files/toybox_probe echo WX-OK-filesDir'" 2>&1 | tee -a "$OUT"
+log "   jika 'Permission denied'/'error=13' -> W^X aktif: rootfs di filesDir"
+log "   TIDAK akan pernah bisa dieksekusi, berapa pun perbaikan path-nya."
+sh_adb "run-as $PKG rm -f files/toybox_probe" >/dev/null 2>&1
+hr
+
+log "== 7. realpath() di domain app (sumber anomali '/' di HANDOFF) =="
+for PTH in "/data/data/$PKG/files" "/data/data/$PKG/files/${ROOTFS#files/}" \
+           "/data/data/$PKG/files/${ROOTFS#files/}/bin/sh" \
+           "/data/data/$PKG/files/${ROOTFS#files/}/lib/ld-musl-aarch64.so.1"; do
+  log "-- $PTH"
+  sh_adb "run-as $PKG sh -c 'ls -ld \"$PTH\" 2>&1; /system/bin/toybox realpath \"$PTH\" 2>&1; echo rc=\$?'" | tee -a "$OUT"
+done
+sh_adb "run-as $PKG sh -c 'ls /data/data/$PKG/files/${ROOTFS#files/}/bin | head -20'" | tee -a "$OUT"
+hr
+
+log "== 8. PROOT DENGAN PROOT_TMP_DIR + verbose (path translation) =="
+if [ -n "${BASE:-}" ] && [ -n "${NATIVE:-}" ]; then
+  log "   proot -v 9 --rootfs=... --cwd=/ /bin/sh -l   (PROOT_TMP_DIR=files/tmp)"
+  sh_adb "run-as $PKG sh -c 'cd files && TMPDIR=/data/data/$PKG/files/tmp PROOT_TMP_DIR=/data/data/$PKG/files/tmp LD_LIBRARY_PATH=$BASE/lib/arm64 $BASE/lib/arm64/libproot.so -v 9 --rootfs=/data/data/$PKG/files/${ROOTFS#files/} --link2symlink -b /proc -b /sys -b /dev --kill-on-exit --cwd=/ /bin/sh -l < files/t.in'" 2>&1 | tail -60 | tee -a "$OUT"
+else
+  log "   dilewati (BASE/NATIVE tidak ketemu)"
+fi
+hr
+
+log "== 9. LOGCAT (com.linuxbox, 200 baris terakhir) =="
 sh_adb "logcat -d -t 200 | grep -i -E 'linuxbox|proot|ptylauncher|avc: denied' | tail -60" 2>&1 | tee -a "$OUT"
 hr
 
