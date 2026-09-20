@@ -45,6 +45,8 @@ public class TermServerService extends Service {
     private static final int NOTIF_ID = 1;
     private static final String TAG = "TermServer";
     private static final String PREFS = "linuxbox";
+    /** WakeLock dilepas kalau tidak ada klien selama 5 menit (hemat baterai). */
+    private static final long IDLE_RELEASE_MS = 5 * 60 * 1000L;
 
     private final AtomicReference<WebTerminalServer> serverRef = new AtomicReference<>();
     private final AtomicBoolean starting = new AtomicBoolean(false);
@@ -52,6 +54,8 @@ public class TermServerService extends Service {
     private PowerManager.WakeLock wakeLock;
     private WifiManager.WifiLock wifiLock;
     private Thread notifierThread;
+    private volatile boolean lanMode;
+    private volatile long idleSince = System.currentTimeMillis();
 
     @Override
     public void onCreate() {
@@ -100,6 +104,7 @@ public class TermServerService extends Service {
             final boolean finalLan = lan;
             final boolean finalAuth = auth;
 
+            lanMode = finalLan;
             startForeground(NOTIF_ID, buildNotification("memulai terminal...", "LinuxBox memulai terminal..."));
 
             new Thread(() -> {
@@ -158,6 +163,17 @@ public class TermServerService extends Service {
                 if (serverRef.get() != server) return;
                 int alive = server.sessions().aliveCount();
                 int total = server.sessions().list().size();
+
+                // Hemat baterai: WakeLock/WifiLock hanya perlu selama ada yang
+                // memakai terminal atau server dibuka ke LAN. Sesinya sendiri
+                // tetap hidup; cuma CPU yang boleh tidur saat layar mati.
+                if (server.clientCount() > 0 || lanMode) {
+                    idleSince = System.currentTimeMillis();
+                    acquireLocks();
+                } else if (System.currentTimeMillis() - idleSince > IDLE_RELEASE_MS) {
+                    releaseLocks();
+                }
+
                 if (alive == lastCount) continue;
                 lastCount = alive;
                 updateNotification(url, alive + "/" + total + " sesi hidup — " + url);

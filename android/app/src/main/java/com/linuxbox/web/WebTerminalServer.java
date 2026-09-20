@@ -59,6 +59,9 @@ public class WebTerminalServer {
 
     /** Interval ping: mendeteksi socket setengah terbuka (HP pindah jaringan). */
     private static final long PING_INTERVAL_MS = 10000L;
+
+    /** Batas koneksi bersamaan. Tiap koneksi = 1 thread, jadi harus dibatasi. */
+    private static final int MAX_CLIENTS = 32;
     private static final byte[] EMPTY = new byte[0];
 
     private final Context ctx;
@@ -96,6 +99,11 @@ public class WebTerminalServer {
 
     public SessionManager sessions() {
         return sessions;
+    }
+
+    /** Jumlah koneksi aktif; dipakai service untuk melepas WakeLock saat idle. */
+    public int clientCount() {
+        return clients.size();
     }
 
     public void start() throws Exception {
@@ -186,8 +194,15 @@ public class WebTerminalServer {
         Client client = null;
         try {
             sock.setSoTimeout(0);
-            InputStream input = sock.getInputStream();
-            OutputStream output = sock.getOutputStream();
+            // WAJIB dibungkus buffered: readHttpLine() membaca header byte demi
+            // byte. Tanpa buffer itu berarti satu syscall read() per byte header.
+            InputStream input = new java.io.BufferedInputStream(sock.getInputStream(), 8192);
+            OutputStream output = new java.io.BufferedOutputStream(sock.getOutputStream(), 8192);
+
+            if (clients.size() >= MAX_CLIENTS) {
+                httpError(output, 503, "too many connections");
+                return;
+            }
 
             String requestLine = readHttpLine(input);
             if (requestLine == null) return;
