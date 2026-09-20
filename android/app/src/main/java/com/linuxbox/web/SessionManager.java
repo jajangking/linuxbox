@@ -4,6 +4,7 @@ import android.content.Context;
 
 import com.linuxbox.distro.DistroCatalog;
 import com.linuxbox.distro.ProotSession;
+import com.linuxbox.distro.RootfsGuard;
 import com.linuxbox.distro.PtyHelper;
 
 import java.io.File;
@@ -80,6 +81,7 @@ public final class SessionManager {
         public volatile String lastError;
         public volatile long restarts;
         public volatile PtyHelper pty;
+        private volatile Thread supervisor;
 
         final Scrollback scrollback = new Scrollback(SCROLLBACK_MAX);
         /** Penonton (client websocket) yang sedang menempel ke sesi ini. */
@@ -199,6 +201,29 @@ public final class SessionManager {
             } catch (IOException ignored) {
             }
         }
+        // Sekali setelah restore/repair, buka distro yang baru dipulihkan lebih
+        // dahulu. Tab lain tidak dihapus; jangan kembali ke tab Alpine lama.
+        String restored = DistroCatalog.restoredSessionDistro(ctx);
+        if (restored != null) {
+            Session preferred = null;
+            for (Session s : list()) {
+                if (!s.isNative() && restored.equals(s.distroId)) { preferred = s; break; }
+            }
+            if (preferred == null) {
+                try { preferred = create("restore " + restored, restored); }
+                catch (IOException ignored) { /* hint tetap ada untuk percobaan berikut */ }
+            }
+            if (preferred != null) {
+                synchronized (sessions) {
+                    Map<String, Session> previous = new LinkedHashMap<>(sessions);
+                    sessions.clear();
+                    sessions.put(preferred.id, preferred);
+                    sessions.putAll(previous);
+                }
+                persist();
+                DistroCatalog.clearRestoredSessionDistro(ctx);
+            }
+        }
     }
 
     public Session create(String name) throws IOException {
@@ -262,6 +287,7 @@ public final class SessionManager {
         Session s = sessions.remove(id);
         if (s == null) return false;
         s.dying.set(true);
+        if (s.supervisor != null) s.supervisor.interrupt();
         PtyHelper p = s.pty;
         if (p != null) {
             try { p.close(); } catch (Exception ignored) {}
@@ -280,6 +306,7 @@ public final class SessionManager {
         running.set(false);
         for (Session s : list()) {
             s.dying.set(true);
+            if (s.supervisor != null) s.supervisor.interrupt();
             PtyHelper p = s.pty;
             if (p != null) {
                 try { p.close(); } catch (Exception ignored) {}
@@ -378,10 +405,26 @@ public final class SessionManager {
     private void startSupervisor(Session s) {
         Thread t = new Thread(() -> supervise(s), "sess-" + s.id);
         t.setDaemon(true);
+        s.supervisor = t;
         t.start();
     }
 
     private void supervise(Session s) {
+        // Lease sendiri menutup celah Stop ketika openSession masih membuat PTY.
+        // Restore menunggu supervisor benar-benar keluar, bukan hanya UI "Stop".
+        if (!running.get() || s.dying.get() || !RootfsGuard.beginService()) return;
+        try {
+            superviseWithLease(s);
+        } finally {
+            PtyHelper p = s.pty;
+            if (p != null) { try { p.close(); } catch (Exception ignored) {} }
+            s.pty = null;
+            s.alive = false;
+            RootfsGuard.endService();
+        }
+    }
+
+    private void superviseWithLease(Session s) {
         long delay = RESTART_MIN_MS;
         while (running.get() && !s.dying.get()) {
             long startedAt = System.currentTimeMillis();
@@ -398,6 +441,9 @@ public final class SessionManager {
                 continue;
             }
             s.pty = p;
+            // Jangan biarkan shell baru tetap 80 kolom sampai round-trip browser.
+            // Ini penting untuk readline yang menggambar ulang input setelah paste.
+            p.resize(s.rows, s.cols);
             s.alive = true;
             s.lastError = null;
             String info = s.isNative()

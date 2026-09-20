@@ -16,7 +16,7 @@ import java.util.Date;
 import java.util.Locale;
 
 /**
- * Backup (ekspor) dan restore (impor) rootfs aktif dalam satu tap.
+ * Backup rootfs aktif; restore mendeteksi distro dari isi arsip dan meminta konfirmasi tujuan.
  *
  * Backup bisa ditulis apa adanya (tar.gz) atau dienkripsi dengan passphrase
  * (tar.gz + {@link Crypto#EXTENSION}). Versi terenkripsi aman disimpan di
@@ -101,75 +101,120 @@ public final class BackupManager {
         return out;
     }
 
-    /**
-     * Pulihkan rootfs dari tar.gz: ekstrak ke direktori sementara lalu tukar
-     * dengan rootfs aktif (yang lama jadi .bak dan dihapus kalau sukses).
-     */
-    public static void importRootfs(Context ctx, File archive, TaskLog log) throws IOException {
-        importRootfs(ctx, archive, log, null);
+    /** Restore dua tahap: ekstrak/identifikasi dulu, minta konfirmasi sebelum swap. */
+    public static final class RestorePlan implements AutoCloseable {
+        public final String distroId;
+        public final boolean replacesExisting;
+        private final File filesDir;
+        private final File staged;
+        private boolean applied;
+
+        private RestorePlan(File filesDir, File staged, String distroId) {
+            this.filesDir = filesDir;
+            this.staged = staged;
+            this.distroId = distroId;
+            this.replacesExisting = present(ProotSession.rootfsDir(filesDir, distroId));
+        }
+
+        @Override public void close() { TarUtil.deleteRecursively(staged); }
     }
 
-    /**
-     * @param passphrase wajib diisi kalau berkas backup terenkripsi; diabaikan
-     *                   (boleh null) untuk backup tar.gz biasa
-     */
-    public static void importRootfs(Context ctx, File archive, TaskLog log, char[] passphrase)
-            throws IOException {
-        if (archive == null || !archive.isFile()) {
-            throw new IOException("berkas backup tidak ditemukan");
-        }
+    public static RestorePlan prepareRestore(Context ctx, File archive, TaskLog log,
+                                              char[] passphrase) throws IOException {
+        if (archive == null || !archive.isFile()) throw new IOException("berkas backup tidak ditemukan");
         File filesDir = ctx.getFilesDir();
-        boolean encrypted = Crypto.isEncrypted(archive);
-        if (encrypted && (passphrase == null || passphrase.length == 0)) {
-            throw new IOException("backup ini terenkripsi — masukkan passphrase-nya");
-        }
-        File plain = archive;
+        File staged = new File(filesDir, "rootfs-import-" + java.util.UUID.randomUUID());
         File decrypted = null;
-        if (encrypted) {
-            if (log != null) log.log("Mendekripsi backup (" + Crypto.describe() + ")...");
-            decrypted = new File(filesDir,
-                    "restore-dec-" + System.currentTimeMillis() + ".tar.gz");
-            Crypto.decrypt(archive, decrypted, passphrase);
-            plain = decrypted;
-            if (log != null) {
-                log.log("  ok, " + Downloader.human(decrypted.length()) + " siap diekstrak");
+        boolean ready = false;
+        try (RootfsGuard.Change ignored = RootfsGuard.beginChange()) {
+            File plain = archive;
+            if (Crypto.isEncrypted(archive)) {
+                if (passphrase == null || passphrase.length == 0) {
+                    throw new IOException("backup ini terenkripsi — masukkan passphrase-nya");
+                }
+                decrypted = File.createTempFile("restore-dec-", ".tar.gz", filesDir);
+                if (log != null) log.log("Mendekripsi backup...");
+                Crypto.decrypt(archive, decrypted, passphrase);
+                plain = decrypted;
             }
-        }
-        try {
-            importPlain(ctx, plain, log);
+            if (log != null) log.log("Memeriksa isi backup (belum mengganti distro)...");
+            if (TarUtil.extract(plain, staged, log) == 0) throw new IOException("arsip rootfs kosong");
+            String id = knownIdentity(ctx, staged);
+            RootfsIdentity.validateShell(staged);
+            RestorePlan plan = new RestorePlan(filesDir, staged, id);
+            if (log != null) log.log("Distro terdeteksi: " + id + " → rootfs-" + id);
+            ready = true;
+            return plan;
         } finally {
             if (decrypted != null) decrypted.delete();
+            if (!ready) TarUtil.deleteRecursively(staged);
         }
     }
 
-    /** Ekstrak tar.gz (sudah dalam keadaan polos) ke rootfs aktif. */
-    private static void importPlain(Context ctx, File archive, TaskLog log) throws IOException {
-        File filesDir = ctx.getFilesDir();
-        File active = ProotSession.activeRootfsDir(ctx);
-        File tmp = new File(filesDir, "rootfs-import-" + System.currentTimeMillis());
-        File bak = new File(filesDir, active.getName() + ".bak-" + System.currentTimeMillis());
+    /** Hanya dipanggil sesudah user mengonfirmasi distro tujuan yang terdeteksi. */
+    public static void applyRestore(Context ctx, RestorePlan plan, TaskLog log) throws IOException {
+        try (RootfsGuard.Change ignored = RootfsGuard.beginChange()) {
+            if (plan.applied || !plan.staged.isDirectory()
+                    || !ctx.getFilesDir().equals(plan.filesDir)) throw new IOException("rencana restore sudah tidak valid");
+            if (!plan.distroId.equals(knownIdentity(ctx, plan.staged))) throw new IOException("identitas backup berubah");
+            RootfsIdentity.validateShell(plan.staged);
+            File target = ProotSession.rootfsDir(plan.filesDir, plan.distroId);
+            boolean exists = present(target);
+            if (exists && !plan.replacesExisting) {
+                throw new IOException("distro tujuan baru saja dibuat; ulangi restore untuk konfirmasi penggantian");
+            }
+            File previous = new File(plan.filesDir, target.getName() + ".before-restore-" + java.util.UUID.randomUUID());
+            if (exists && !target.renameTo(previous)) throw new IOException("gagal menyimpan rootfs sebelumnya");
+            if (!plan.staged.renameTo(target)) {
+                if (exists && !previous.renameTo(target)) {
+                    throw new IOException("swap gagal; rootfs sebelumnya tetap tersimpan di " + previous.getName());
+                }
+                throw new IOException("gagal menempatkan rootfs baru; rootfs sebelumnya tidak diganti");
+            }
+            plan.applied = true;
+            // Jangan hapus rootfs sebelumnya: user masih bisa menyelamatkan perubahan
+            // yang ternyata belum termasuk arsip backup. Distro lain tidak disentuh.
+            if (log != null && exists) log.log("Rootfs sebelumnya disimpan: " + previous.getAbsolutePath());
+            if (!DistroCatalog.activateRestored(ctx, plan.distroId)) {
+                throw new IOException("rootfs sudah dipulihkan, tetapi gagal menyimpan distro aktif; jangan hapus data aplikasi");
+            }
+            if (log != null) log.log("Selesai. Distro aktif: " + plan.distroId);
+        }
+    }
 
-        if (log != null) {
-            log.log("Memulihkan " + archive.getName() + " (" + Downloader.human(archive.length()) + ")");
+    /** Pemulihan instalasi lama yang Ubuntu-nya telanjur berada di rootfs-alpine. */
+    public static void repairActiveIdentity(Context ctx, TaskLog log) throws IOException {
+        try (RootfsGuard.Change ignored = RootfsGuard.beginChange()) {
+            String oldId = DistroCatalog.activeId(ctx);
+            File source = ProotSession.rootfsDir(ctx.getFilesDir(), oldId);
+            String actualId = knownIdentity(ctx, source);
+            RootfsIdentity.validateShell(source);
+            if (oldId.equals(actualId)) {
+                if (log != null) log.log("Identitas distro sudah benar: " + actualId);
+                return;
+            }
+            File target = ProotSession.rootfsDir(ctx.getFilesDir(), actualId);
+            if (present(target)) {
+                throw new IOException("rootfs-" + actualId + " sudah ada; tidak ditimpa. Backup distro aktif dulu, lalu restore dengan konfirmasi tujuan.");
+            }
+            if (!source.renameTo(target)) throw new IOException("gagal memindahkan rootfs; data asli tidak dihapus");
+            if (!DistroCatalog.activateRestored(ctx, actualId)) {
+                // Jangan buang data jika preferensi gagal ditulis: direktori tujuan
+                // tetap berisi filesystem pengguna secara utuh.
+                throw new IOException("data sudah dipindah ke " + target.getName() + ", tetapi gagal menyimpan distro aktif");
+            }
+            if (log != null) log.log("Identitas diperbaiki: " + oldId + " → " + actualId + ". Isi rootfs tidak diekstrak ulang/dihapus.");
         }
-        try {
-            TarUtil.deleteRecursively(tmp);
-            int entries = TarUtil.extract(archive, tmp, log);
-            if (entries == 0) {
-                throw new IOException("arsip tidak berisi rootfs yang valid");
-            }
-            if (active.exists() && !active.renameTo(bak)) {
-                throw new IOException("gagal memindahkan rootfs lama: " + active.getAbsolutePath());
-            }
-            if (!tmp.renameTo(active)) {
-                if (bak.exists()) bak.renameTo(active);
-                throw new IOException("gagal menempatkan rootfs baru");
-            }
-            TarUtil.deleteRecursively(bak);
-            if (log != null) log.log("Selesai. " + entries + " entri dipulihkan ke " + active.getName());
-        } finally {
-            TarUtil.deleteRecursively(tmp);
-        }
+    }
+
+    private static boolean present(File file) {
+        return java.nio.file.Files.exists(file.toPath(), java.nio.file.LinkOption.NOFOLLOW_LINKS);
+    }
+
+    private static String knownIdentity(Context ctx, File root) throws IOException {
+        String id = RootfsIdentity.detect(root);
+        if (DistroCatalog.find(ctx, id) == null) throw new IOException("distro tidak ada di katalog: " + id);
+        return id;
     }
 
     private static void writeText(File f, String text) throws IOException {

@@ -171,6 +171,22 @@ public final class DistroCatalog {
                 .edit().putString(KEY_DISTRO, id).apply();
     }
 
+    /** Commit identitas + hint sesi sebagai satu pembaruan setelah rootfs ditempatkan. */
+    public static boolean activateRestored(Context ctx, String id) {
+        return ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+                .putString(KEY_DISTRO, id).putString("restored_session_distro", id).commit();
+    }
+
+    public static String restoredSessionDistro(Context ctx) {
+        return ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .getString("restored_session_distro", null);
+    }
+
+    public static void clearRestoredSessionDistro(Context ctx) {
+        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+                .remove("restored_session_distro").apply();
+    }
+
     /** true kalau rootfs distro ini sudah terpasang. */
     public static boolean isInstalled(Context ctx, String id) {
         File root = new File(ctx.getFilesDir(), "rootfs-" + id);

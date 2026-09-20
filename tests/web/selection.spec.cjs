@@ -185,9 +185,10 @@ test('single-character selection at left edge has two independently draggable ma
 });
 
 test('closing keyboard cannot resize away a live selection; fit resumes after cancel', async ({ page }) => {
+  const fullRows = await page.evaluate(() => window.testTerm.rows);
   await page.setViewportSize({ width: 412, height: 500 });
-  // Wait for window resize and FitAddon, not just setViewportSize's CDP response.
-  await page.waitForTimeout(100);
+  // Wait for the debounced FitAddon, not just setViewportSize's CDP response.
+  await expect.poll(() => page.evaluate(() => window.testTerm.rows)).toBeLessThan(fullRows);
   const initialRows = await page.evaluate(() => window.testTerm.rows);
   const point = await cell(page, 6, 0);
   await page.touchscreen.tap(point.x, point.y);
@@ -195,7 +196,8 @@ test('closing keyboard cannot resize away a live selection; fit resumes after ca
   await select(page);
   await expectNoKeyboardFocus(page);
   await page.setViewportSize({ width: 412, height: 820 });
-  await page.waitForTimeout(100);
+  // Longer than the 120ms fit debounce: a live selection must still freeze it.
+  await page.waitForTimeout(220);
   expect(await selected(page)).toBe('bravo');
   expect(await page.evaluate(() => window.testTerm.rows)).toBe(initialRows);
   await expect(page.locator('#selectionStart')).toBeVisible();

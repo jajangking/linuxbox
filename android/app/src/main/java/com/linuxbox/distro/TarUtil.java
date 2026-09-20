@@ -286,7 +286,11 @@ public final class TarUtil {
 
     /** Hapus direktori berikut isinya (dipakai saat swap rootfs). */
     public static void deleteRecursively(File f) {
-        if (f == null || !f.exists()) return;
+        if (f == null) return;
+        // Cleanup staging/backup tidak boleh mengikuti symlink ke luar rootfs,
+        // termasuk symlink absolut milik guest atau dangling symlink.
+        if (Files.isSymbolicLink(f.toPath())) { f.delete(); return; }
+        if (!f.exists()) return;
         if (f.isDirectory()) {
             File[] kids = f.listFiles();
             if (kids != null) for (File k : kids) deleteRecursively(k);

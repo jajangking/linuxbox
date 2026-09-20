@@ -32,7 +32,9 @@ MainActivity ──install──> Bootstrap (unduh/extract rootfs + proot)
   SHA-256 sekali jalan, berkas `.part` dulu) — tidak perlu menaruh tar.gz besar
   di APK. `assets/rootfs.tar.gz` tetap didukung sebagai fallback.
 - **Backup/restore**: rootfs aktif dikemas jadi tar.gz (+`.sha256`), disalin ke
-  folder Download, dan bisa dipulihkan dari berkas pilihan (SAF).
+  folder Download, dan bisa dipulihkan dari berkas pilihan (SAF). Restore
+  mendeteksi distro dari `os-release`, menampilkan tujuan untuk dikonfirmasi,
+  dan tidak menimpa distro lain hanya karena distro tersebut sedang aktif.
 - **Autentikasi**: saat server dibuka ke LAN, akses web terminal wajib token
   (`?token=...` atau cookie `linuxbox_token`); tanpa token -> halaman 401 yang
   menjelaskan apa yang harus dilakukan.
@@ -221,6 +223,63 @@ unzip -p termux-app.apk lib/arm64-v8a/libbusybox.so \
   tidak terbaca) …`). Kalau baris itu menunjukkan `sha256 0/3`, unduhan tidak
   akan diverifikasi — itu tanda aset di APK usang.
 
+### Restore dan memperbaiki distro yang salah label
+
+**Simpan pekerjaan dan Stop server sebelum restore/perbaikan**. Ini menghentikan
+proses berjalan; restore memulihkan file, bukan checkpoint proses. Operasi akan
+ditolak selama service atau supervisor PTY masih memegang rootfs, termasuk ketika
+Stop sedang menunggu startup/proses selesai. Start juga ditolak selama ekstraksi
+atau pemindahan rootfs berlangsung.
+
+Restore sekarang dua tahap, sama untuk `.tar.gz` dan `.lbx`:
+1. Dekripsi jika diperlukan, ekstrak ke staging, lalu baca `/etc/os-release`
+   (fallback `/usr/lib/os-release`). Nama file backup/distro aktif tidak dijadikan
+   identitas. Symlink absolut `os-release` di-resolve relatif ke rootfs guest;
+   isi file tidak dieksekusi sebagai skrip shell.
+2. Tampilkan konfirmasi distro dan tujuan, misalnya **ubuntu-2404 → rootfs-ubuntu-2404**.
+   Jika folder tujuan sudah ada, konfirmasi menyebut penggantian tersebut.
+   Jika identitas tidak dikenal/tidak ada di katalog atau shell tidak ditemukan,
+   restore dibatalkan tanpa mengganti rootfs. Batal membersihkan staging.
+3. Setelah dikonfirmasi, tempatkan rootfs dan aktifkan identitas yang benar.
+   Rootfs tujuan sebelumnya **dipertahankan** sebagai
+   `files/rootfs-<id>.before-restore-<uuid>`; ini memakai ruang tambahan dan bukan
+   ekspor ke Download. Distro lain tidak diganti. Saat Start berikutnya, sesi
+   distro yang dipulihkan diprioritaskan (atau dibuat jika slot sesi tersedia).
+   Buka terminal dari halaman utama agar tab awal mengikuti distro tersebut.
+
+APK lama bisa menaruh backup Ubuntu ke `rootfs-alpine`. Gejalanya: banner
+`alpine /bin/bash`, tetapi `cat /etc/os-release` menampilkan Ubuntu. Untuk kasus
+ini, setelah update APK dengan keystore yang sama (**jangan uninstall/clear data**):
+
+1. Simpan backup yang ada, simpan pekerjaan, lalu **Stop** dan tunggu server berhenti.
+2. Tekan **Perbaiki distro** di halaman utama. Yang diperiksa adalah distro
+   **aktif**, bukan pilihan spinner yang belum diterapkan.
+3. Jika `rootfs-ubuntu-2404` belum ada, folder yang salah label di-rename ke tujuan
+   yang benar; isi file tidak diekstrak ulang/dihapus. Distro aktif dan pilihan UI
+   ikut diperbarui. Tab tersimpan yang folder distronya sudah tidak ada mengikuti
+   distro aktif, dan sesi distro yang diperbaiki diprioritaskan saat Start.
+4. Jika folder tujuan sudah ada, perbaikan **menolak menimpanya**. Backup rootfs
+   aktif yang salah label terlebih dahulu, lalu Restore backup tersebut setelah
+   memeriksa konfirmasi penggantian distro tujuan. Tidak ada penggabungan otomatis
+   dua instalasi Ubuntu yang berbeda.
+
+Peringatan `groups: cannot find name for group ID ...` dapat berasal dari GID
+Android yang tidak punya nama dalam `/etc/group` guest. Itu bukan bukti restore
+gagal. Perbaikan identitas ini tidak menambah grup palsu atau menyembunyikan stderr.
+Riwayat terminal lama tetap dapat memuat banner Alpine; periksa banner startup
+terbaru dan `/etc/os-release`, bukan hanya teks hasil replay.
+
+Tes parser identitas/maintenance tanpa Android SDK atau unduhan Maven (JDK 11+):
+
+```bash
+bash scripts/test-rootfs-identity.sh
+```
+
+Uji di HP tetap diperlukan: restore backup Ubuntu saat Alpine aktif, batalkan
+konfirmasi (data lama harus utuh), konfirmasi ke Ubuntu (Alpine tidak berubah),
+perbaiki folder salah label dengan/tanpa konflik tujuan, dan coba restore saat
+server masih hidup (harus ditolak). Pastikan sesi startup baru beridentitas Ubuntu.
+
 ### Error backup: `commons/lang3/SystemProperties`
 
 Jika Backup biasa dan terenkripsi sama-sama berhenti dengan:
@@ -352,6 +411,17 @@ open(dst, "wb").write(AESGCM(key).decrypt(raw[20:32], raw[32:], None))
   Menyeleksi/menyalin tidak otomatis membuka keyboard; jika clipboard ditolak
   browser, seleksi tetap tersedia untuk dicoba ulang. Resize grid/PTY ditunda
   selama seleksi aktif agar animasi penutupan keyboard tidak menghapus seleksi.
+- **Geser kursor di HP**: aktifkan tombol **Kursor**, lalu geser kiri/kanan di
+  area terminal seperti trackpad. Gerakan mengirim tombol panah ke shell/editor,
+  bukan memindahkan kursor layar secara paksa atau menebak batas prompt. Geser
+  vertikal tetap untuk scroll; tahan tetap untuk seleksi. Matikan **Kursor**
+  untuk kembali ke gestur biasa. Ini bukan tap langsung ke posisi teks.
+- Tombol tambahan (`esc`, `tab`, `ctrl`, `⌫`, `home`, `end`, panah) mempertahankan
+  fokus input: keyboard yang terbuka tidak sengaja ditutup lalu dibuka lagi,
+  dan tombol tidak membuka keyboard yang sudah tersembunyi. Ukuran grid mengikuti
+  viewport setelah animasi keyboard tenang; WebView memakai `adjustResize`.
+  Backspace IME non-komposisi yang datang lewat `beforeinput` diteruskan ke PTY
+  satu kali, termasuk sesudah paste, tanpa menggambar ulang teks secara lokal.
 - **Tempel di HP**: tombol **Tempel** di awal baris tombol terminal membaca
   teks clipboard hanya saat ditekan, tanpa menambah Enter atau membuka keyboard
   terminal. Di WebView bawaan aplikasi, clipboard dibaca melalui Android;
@@ -370,7 +440,7 @@ open(dst, "wb").write(AESGCM(key).decrypt(raw[20:32], raw[32:], None))
 - Indikator status di bawah: terhubung / menyambung ulang / server tidak
   merespons, plus jumlah sesi, distro, dan shell.
 
-### Pengujian sesi, seleksi, dan tempel terminal
+### Pengujian sesi, seleksi, tempel, dan keyboard terminal
 
 Pengujian browser memakai xterm 6 dan FitAddon asli, dengan backend PTY dan
 clipboard pengganti (tidak memerlukan Android SDK atau sesi Linux aktif):
@@ -391,6 +461,15 @@ Unicode/spasi, tidak menambah Enter, bracketed-paste/CRLF, konfirmasi beberapa
 baris/karakter kontrol, clipboard kosong/ditolak/tidak tersedia, fallback manual,
 sesi berganti/koneksi putus saat menunggu clipboard, serta kanal WebView yang
 **dimock** (bukan pembacaan clipboard Android asli).
+
+Pengujian keyboard memeriksa fokus tombol sentuh, backspace IME/keyCode 229,
+hardware backspace tanpa duplikasi, komposisi IME yang tidak boleh dihapus,
+gestur trackpad, application cursor keys, dan debounce viewport. Satu pengujian
+integrasi tambahan memakai **bash + PTY sungguhan** melalui Python stdlib pada
+POSIX: paste command panjang yang membungkus baris, backspace, resize keyboard,
+geser kursor, dan eksekusi harus menghasilkan teks yang tepat tanpa sisa visual.
+Pengujian ini dilewati jika `python3`/`bash` atau dukungan PTY tidak tersedia;
+ini tetap bukan pengujian PTY Android/proot.
 
 Pengujian sesi memakai API dan event WebSocket terkontrol: menutup sesi kedua
 saat aktif/nonaktif, replay riwayat sesi pertama, pengiriman input ke sesi yang
@@ -420,8 +499,81 @@ Tetap lakukan uji pada HP setelah rebuild APK dan muat ulang halaman terminal:
    dipakai tanpa perlu restart server. Ulangi menutup sesi kedua ketika sesi
    pertama yang aktif; tampilan sesi pertama tidak boleh dikosongkan.
 
+8. Buka keyboard, tempel command panjang tanpa menekan Enter. Hapus beberapa
+   karakter dengan backspace, ketik penggantinya, lalu tekan Tab/Esc: keyboard
+   tidak boleh berkedip tutup/buka dan teks yang dihapus tidak boleh muncul lagi.
+9. Aktifkan **Kursor**, geser kiri/kanan untuk mengedit tengah command, lalu
+   gunakan `home`/`end`. Ulangi setelah keyboard ditutup/dibuka; geser vertikal
+   dan tahan untuk seleksi harus tetap bekerja. Uji dengan IME yang dipakai
+   sehari-hari (misalnya Gboard/Samsung) dan command yang membungkus baris.
+
 Emulasi browser hanya memverifikasi fokus/input dan perubahan viewport, bukan
 IME/clipboard sistem Android yang sebenarnya.
+
+### OpenCode: progress turun terus / log ENOENT
+
+**Progress installer membungkus di HP.** Installer resmi
+[`opencode.ai/install`](https://opencode.ai/install), diperiksa 20 September 2026,
+menggambar bar tetap 50 karakter ditambah 5 karakter persentase. Ia memakai
+carriage return (`\r`), yang hanya kembali ke awal **baris fisik saat ini**.
+Jika terminal kurang dari 55 kolom, bar membungkus; pembaruan berikutnya tidak
+naik ke baris awal bar sehingga output bertambah ke bawah. Ini dapat terjadi
+meskipun transport PTY/WebSocket dan emulator sudah menangani `\r` dengan benar.
+
+Sebelum menjalankan installer, putar HP ke landscape atau tekan **A−** sampai
+lebar cukup. Periksa dari shell:
+
+```sh
+stty size
+```
+
+Angka kedua adalah jumlah kolom; sediakan minimal 55 (lebih longgar, misalnya
+60–80, lebih baik). Jangan sekadar `export COLUMNS=80` atau `stty cols 80` saat
+layar sebenarnya lebih sempit: ukuran shell dan layar justru akan berbeda.
+Tidak perlu menginstall ulang OpenCode yang sudah terpasang hanya untuk menguji
+progress. Tes pendek ini seharusnya memperbarui satu baris:
+
+```sh
+for n in 1 2 3 4 5; do printf '\rTes %s/5' "$n"; sleep 1; done; printf '\n'
+```
+
+Tes browser `progress.spec.cjs` memverifikasi CR/erase-line melalui handler frame
+WebSocket biner (termasuk escape sequence/UTF-8 terpotong), mereproduksi bar tetap
+yang membungkus, dan memastikan **A−** mengatasinya ketika lebar sudah cukup.
+Auto-wrap terminal tidak dimatikan dan newline program tidak dihapus, karena
+keduanya dibutuhkan untuk command panjang dan aplikasi TUI. Jika tes pendek
+juga turun baris, catat hasil `stty size`, `stty -a`, versi APK/WebView, dan
+rekaman tampilannya; itu belum dijelaskan oleh lebar bar installer saja.
+
+**`FileSystem.open (.../opencode/log/opencode.log): ENOENT`.** Error ini terpisah
+dari tampilan progress: OpenCode gagal membuka path log. Pesan itu sendiri belum
+membuktikan apakah penyebabnya parent directory hilang, symlink putus, atau
+kompatibilitas runtime/proot. Untuk path `/root/.local/share/opencode/log/opencode.log`
+yang dilaporkan, coba di **sesi distro yang sama**, tanpa menghapus data:
+
+```sh
+mkdir -p /root/.local/share/opencode/log &&
+touch /root/.local/share/opencode/log/opencode.log &&
+opencode
+```
+
+`touch` tidak mengosongkan isi file yang sudah ada. Jika `mkdir`/`touch` gagal,
+berhenti dan periksa errornya; jangan mengganti langkah ini dengan `chmod -R 777`,
+reset distro, atau menghapus `~/.local/share/opencode` (bisa berisi auth/sesi).
+Jika error OpenCode menunjuk path lain, gunakan path yang dilaporkan tersebut.
+Jika shell bisa membuat file tetapi OpenCode tetap melaporkan ENOENT, kumpulkan:
+
+```sh
+opencode --version
+printf 'HOME=%s\nXDG_DATA_HOME=%s\n' "$HOME" "${XDG_DATA_HOME-}"
+ls -ld /root/.local/share/opencode /root/.local/share/opencode/log
+ls -l /root/.local/share/opencode/log/opencode.log
+```
+
+Sertakan distro dan engine sesi (proot/proroot). Tidak perlu mengirim isi
+`auth.json`, token, atau seluruh environment. Workaround log ini belum diverifikasi
+pada perangkat Android; LinuxBox tidak otomatis membuat/mengubah data aplikasi
+OpenCode saat setiap sesi dimulai.
 
 ### Kenapa `targetSdk` dipatok 28
 

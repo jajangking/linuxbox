@@ -2,7 +2,7 @@
 <html lang="id">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
 <meta name="theme-color" content="#0b0e14">
 <title>LinuxBox</title>
 <link rel="stylesheet" href="xterm.css">
@@ -13,11 +13,11 @@
   }
   * { box-sizing: border-box; }
   html, body {
-    height: 100%; margin: 0; background: var(--bg); color: var(--fg);
+    height: 100%; overflow: hidden; margin: 0; background: var(--bg); color: var(--fg);
     font: 13px/1.4 -apple-system, "Segoe UI", Roboto, sans-serif;
     overscroll-behavior: none; -webkit-text-size-adjust: 100%;
   }
-  #app { display: flex; flex-direction: column; height: 100%; }
+  #app { display: flex; flex-direction: column; height: var(--app-height, 100%); }
 
   /* ---- baris tab sesi ---- */
   #tabs {
@@ -97,7 +97,7 @@
     background: var(--bar); border-top: 1px solid var(--line); overflow-x: auto;
   }
   #keys button {
-    flex: 0 0 auto; min-width: 44px; height: 34px; background: #1b2230;
+    flex: 0 0 auto; min-width: 44px; height: 40px; touch-action: pan-x; background: #1b2230;
     color: var(--fg); border: 1px solid var(--line); border-radius: 5px;
     font: 12px monospace; cursor: pointer;
   }
@@ -208,9 +208,13 @@
   </div>
   <div id="keys">
     <button id="pasteBtn" title="Tempel teks dari papan klip">Tempel</button>
+    <button id="cursorModeBtn" aria-pressed="false" title="Mode kursor: geser kiri/kanan di terminal">Kursor</button>
     <button data-key="esc">esc</button>
     <button data-key="tab">tab</button>
     <button data-key="ctrl">ctrl</button>
+    <button data-key="backspace" title="Hapus karakter sebelum kursor">⌫</button>
+    <button data-key="home">home</button>
+    <button data-key="end">end</button>
     <button data-key="minus">-</button>
     <button data-key="up">↑</button>
     <button data-key="down">↓</button>
@@ -295,6 +299,11 @@
     scrollback: 5000
   });
   term.open(termEl);
+  // Input helper bukan editor lokal: jangan biarkan autocorrect mengganti command.
+  term.textarea.setAttribute('autocorrect', 'off');
+  term.textarea.setAttribute('autocapitalize', 'off');
+  term.textarea.setAttribute('autocomplete', 'off');
+  term.textarea.spellcheck = false;
 
   var fit = null;
   if (typeof FitAddon !== 'undefined' && FitAddon.FitAddon) {
@@ -333,11 +342,24 @@
     overlay.classList.add('show');
   }
   function hideOverlay() { overlay.classList.remove('show'); }
+  var fitTimer = null, fitPending = false;
+  function queueFit() {
+    // Browser Android modern mengecilkan visualViewport saja saat IME terbuka.
+    // Resize grid sekali setelah animasi tenang, bukan setiap frame keyboard.
+    var vv = window.visualViewport;
+    if (vv && Math.abs(vv.scale - 1) < 0.01) {
+      document.documentElement.style.setProperty('--app-height', Math.floor(vv.height) + 'px');
+    }
+    clearTimeout(fitTimer);
+    fitTimer = setTimeout(doFit, 120);
+  }
   function doFit() {
     // xterm 6 menghapus seleksi saat jumlah baris berubah. Tunda resize PTY
     // selama memilih: animasi keyboard menutup tidak boleh menghapus highlight
     // atau mengubah baris buffer di bawah jari. Fit kembali setelah selesai.
-    if (touchSelection) { syncSelection(); return; }
+    if (touchSelection || gesture) { fitPending = true; syncSelection(); return; }
+    fitPending = false;
+    clearTimeout(fitTimer);
     try { if (fit) fit.fit(); } catch (e) {}
     sendSize();
   }
@@ -429,6 +451,7 @@
     add.textContent = '+ sesi baru';
     add.addEventListener('click', newSession);
     tabsEl.appendChild(add);
+    doFit();
   }
 
   function newSession() {
@@ -495,7 +518,7 @@
   var KEYMAP = {
     esc: '\x1b', tab: '\t', minus: '-',
     up: '\x1b[A', down: '\x1b[B', left: '\x1b[D', right: '\x1b[C',
-    slash: '/', pipe: '|'
+    slash: '/', pipe: '|', backspace: '\x7f', home: '\x1b[H', end: '\x1b[F'
   };
   // decoder tombol saat kunci "ctrl" (lock) aktif: kirim ^X seperti Termux
   function ctrlKey(dk) {
@@ -645,7 +668,9 @@
   }
 
   // ---------------------------------------------------------------- events
-  window.addEventListener('resize', doFit);
+  window.addEventListener('resize', queueFit);
+  if (window.visualViewport) window.visualViewport.addEventListener('resize', queueFit);
+  if (typeof ResizeObserver !== 'undefined') new ResizeObserver(queueFit).observe(termEl);
   term.onResize(function () { sendSize(); });
   term.onData(function (d) {
     if (ws && ws.readyState === WebSocket.OPEN) ws.send(d);
@@ -660,6 +685,65 @@
       doFit();
       if (!ws || ws.readyState !== WebSocket.OPEN) { retries = 0; connect(); }
     }
+  });
+
+  // ---------- keyboard toolbar & IME ----------
+  var keysEl = document.getElementById('keys');
+  // Batalkan default fokus tombol, BUKAN blur lalu focus() kembali. Cara kedua
+  // menutup/membuka IME dan membuat readline menggambar ulang command berulang.
+  function keepTerminalFocus(e) {
+    if (e.target.closest('button')) e.preventDefault();
+  }
+  keysEl.addEventListener('pointerdown', keepTerminalFocus);
+  keysEl.addEventListener('mousedown', keepTerminalFocus);
+
+  var imeComposing = false, hardwareDelete = null, inputGeneration = 0;
+  termEl.addEventListener('compositionstart', function () { imeComposing = true; inputGeneration++; }, true);
+  termEl.addEventListener('compositionend', function () { imeComposing = false; inputGeneration++; }, true);
+  term.textarea.addEventListener('blur', function () { hardwareDelete = null; inputGeneration++; });
+  termEl.addEventListener('keydown', function (e) {
+    inputGeneration++;
+    hardwareDelete = !e.isComposing && e.keyCode !== 229 &&
+        (e.key === 'Backspace' ? 'deleteContentBackward' : (e.key === 'Delete' ? 'deleteContentForward' : null));
+  }, true);
+  termEl.addEventListener('keyup', function () { hardwareDelete = null; }, true);
+  termEl.addEventListener('beforeinput', function (e) {
+    var generation = ++inputGeneration;
+    // Sebagian IME mengirim delete tanpa keydown Backspace (atau hanya 229).
+    // xterm 6 tidak memproses inputType delete ketika textarea kosong setelah
+    // paste. Kirim tepat satu kode PTY; jangan hapus/draw teks di layar sendiri.
+    if (e.target !== term.textarea || !e.cancelable || imeComposing || e.isComposing || term.textarea.readOnly) return;
+    if (e.inputType !== 'deleteContentBackward' && e.inputType !== 'deleteContentForward') return;
+    e.preventDefault(); e.stopImmediatePropagation();
+    if (hardwareDelete !== e.inputType) {
+      term.input(e.inputType === 'deleteContentBackward' ? '\x7f' : '\x1b[3~', true);
+    }
+    // Biarkan diff keyCode 229 milik xterm selesai dahulu, lalu buang konteks
+    // helper lama agar IME tidak mengirim ulang teks sebelum paste/backspace.
+    var helperValue = term.textarea.value;
+    setTimeout(function () {
+      if (!imeComposing && inputGeneration === generation && term.textarea.value === helperValue) {
+        term.textarea.value = '';
+      }
+    }, 0);
+  }, true);
+
+  function arrowKey(direction) {
+    var letter = { left: 'D', right: 'C', up: 'A', down: 'B', home: 'H', end: 'F' }[direction];
+    if (!letter) return null;
+    return '\x1b' + (term.modes.applicationCursorKeysMode ? 'O' : '[') + letter;
+  }
+  function sendKey(data) {
+    if (!data || !ws || ws.readyState !== WebSocket.OPEN) return;
+    term.input(data, true);
+  }
+  var cursorMode = false;
+  var cursorModeBtn = document.getElementById('cursorModeBtn');
+  cursorModeBtn.addEventListener('click', function () {
+    cursorMode = !cursorMode;
+    cursorModeBtn.classList.toggle('on', cursorMode);
+    cursorModeBtn.setAttribute('aria-pressed', String(cursorMode));
+    if (cursorMode) flash('Kursor: geser kiri/kanan. Tahan untuk seleksi.', 3000);
   });
 
   // ---------- gestur sentuh: scroll & seleksi ----------
@@ -794,7 +878,7 @@
       clearTimeout(holdTimer);
       if (e.touches.length !== 1) { gesture = null; return; }
       var t = e.touches[0], range = selectionRange();
-      gesture = { id: t.identifier, x: t.clientX, y: t.clientY, lastY: t.clientY,
+      gesture = { id: t.identifier, x: t.clientX, y: t.clientY, lastY: t.clientY, lastX: t.clientX,
                   anchor: cellAt(t.clientX, t.clientY), mode: 'wait' };
       var handle = e.target.closest('.selection-handle');
       if (handle && range) {
@@ -847,8 +931,21 @@
       }
       if (mode === 'wait' && Math.max(Math.abs(t.clientX - gesture.x), Math.abs(t.clientY - gesture.y)) < 8) return;
       clearTimeout(holdTimer);
+      if (mode === 'cursor' || (mode === 'wait' && cursorMode && !touchSelection &&
+          Math.abs(t.clientX - gesture.x) > Math.abs(t.clientY - gesture.y))) {
+        gesture.mode = 'cursor';
+        // Trackpad relatif: tidak menebak batas prompt / posisi editor remote.
+        // TUI/readline tetap pemilik kursor dan menerima arrow-key yang sesuai.
+        var steps = Math.trunc((t.clientX - gesture.lastX) / Math.max(8, geometry().cw));
+        steps = Math.max(-32, Math.min(32, steps));
+        if (steps) {
+          sendKey(arrowKey(steps < 0 ? 'left' : 'right').repeat(Math.abs(steps)));
+          gesture.lastX += steps * Math.max(8, geometry().cw);
+        }
+        return;
+      }
       gesture.mode = 'scroll';
-      blurEditable();
+      if (!cursorMode) blurEditable();
       var lines = Math.trunc((gesture.lastY - t.clientY) / geometry().lh);
       if (lines) { term.scrollLines(lines); gesture.lastY -= lines * geometry().lh; }
     }, { capture: true, passive: false });
@@ -863,6 +960,7 @@
         term.focus(); // hanya tap disengaja yang membuka keyboard
       }
       syncSelection();
+      if (fitPending && !touchSelection) doFit();
     }
     termEl.addEventListener('touchend', endTouch, { capture: true, passive: false });
     termEl.addEventListener('touchcancel', endTouch, { capture: true, passive: false });
@@ -932,7 +1030,7 @@
       return false;
     }
     if (!text) { flash('Papan klip kosong atau tidak berisi teks.', 3000); return false; }
-    finishSelection();
+    if (touchSelection || term.hasSelection()) finishSelection();
     // Lewat xterm, bukan ws.send: hormati bracketed paste dan normalisasi CRLF.
     // Jangan menambah Enter atau memfokuskan textarea terminal.
     term.paste(text);
@@ -1075,6 +1173,7 @@
       '• Tahan teks lalu tarik untuk memilih; geser marker awal/akhir untuk menyesuaikan.\n' +
       '• Salin menyalin seleksi, Batal menutupnya, Ketik membuka keyboard lagi.\n' +
       '• Tempel membaca papan klip; teks beberapa baris diperiksa sebelum dikirim.\n' +
+      '• Kursor: aktifkan lalu geser kiri/kanan di terminal seperti trackpad.\n' +
       '• Pilihan distro di sebelah "+ Sesi" menentukan distro sesi baru,\n' +
       '  jadi satu tab bisa alpine dan tab lain ubuntu.\n' +
       '• status "sdcard ✓" berarti /sdcard di-bind ke dalam guest.\n\n' +
@@ -1092,9 +1191,10 @@
         b.textContent = ctrlLock ? '^' : 'ctrl';
         return;
       }
-      var k = ctrlLock ? (ctrlKey(dk) || KEYMAP[dk]) : KEYMAP[dk];
-      if (k && ws && ws.readyState === WebSocket.OPEN) ws.send(k);
-      // jangan refokus textarea: itu hanya membuat soft keyboard muncul lagi.
+      var plain = arrowKey(dk) || KEYMAP[dk];
+      var k = ctrlLock ? (ctrlKey(dk) || plain) : plain;
+      sendKey(k);
+      // Fokus tidak dipindahkan sejak pointerdown, jadi tidak perlu focus()/blur().
     });
   });
 
@@ -1109,6 +1209,7 @@
   });
   setInterval(watchdog, 15000);
   setInterval(function () { if (ws && ws.readyState === WebSocket.OPEN) sendSize(); }, 20000);
+  queueFit();
   doFit();
 })();
 </script>

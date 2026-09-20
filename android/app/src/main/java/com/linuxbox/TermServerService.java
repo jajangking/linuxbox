@@ -14,6 +14,7 @@ import android.os.PowerManager;
 import android.util.Log;
 import android.widget.Toast;
 
+import com.linuxbox.distro.RootfsGuard;
 import com.linuxbox.web.TokenStore;
 import com.linuxbox.web.WebTerminalServer;
 
@@ -50,6 +51,10 @@ public class TermServerService extends Service {
 
     private final AtomicReference<WebTerminalServer> serverRef = new AtomicReference<>();
     private final AtomicBoolean starting = new AtomicBoolean(false);
+
+    private final Object lifecycleLock = new Object();
+    private boolean rootfsLease;
+    private boolean destroyed;
 
     private PowerManager.WakeLock wakeLock;
     private WifiManager.WifiLock wifiLock;
@@ -98,6 +103,15 @@ public class TermServerService extends Service {
         }
         if (port < 1024 || port > 65535) port = 8770;
 
+        if (!rootfsLease) {
+            if (!RootfsGuard.beginService()) {
+                prefs().edit().putBoolean("srv_wanted", false).apply();
+                Toast.makeText(this, "Restore/perbaikan rootfs sedang berjalan. Start setelah selesai.", Toast.LENGTH_LONG).show();
+                stopSelf();
+                return START_NOT_STICKY;
+            }
+            rootfsLease = true;
+        }
         if (serverRef.get() == null && starting.compareAndSet(false, true)) {
             acquireLocks();
             final int finalPort = port;
@@ -108,20 +122,21 @@ public class TermServerService extends Service {
             startForeground(NOTIF_ID, buildNotification("memulai terminal...", "LinuxBox memulai terminal..."));
 
             new Thread(() -> {
+                WebTerminalServer server = null;
                 try {
-                    WebTerminalServer server =
-                            new WebTerminalServer(this, finalPort, finalLan, tokenFor(finalLan, finalAuth));
+                    server = new WebTerminalServer(this, finalPort, finalLan, tokenFor(finalLan, finalAuth));
                     server.start();
-                    serverRef.set(server);
-                    starting.set(false);
-
-                    String url = urlFor(server, finalLan, finalAuth);
-                    updateNotification(url, "Terminal aktif: " + url);
-                    broadcastState(true, url, server, null);
-                    startNotifier(server, url);
+                    synchronized (lifecycleLock) {
+                        if (destroyed) { server.stop(); return; }
+                        serverRef.set(server);
+                        String url = urlFor(server, finalLan, finalAuth);
+                        updateNotification(url, "Terminal aktif: " + url);
+                        broadcastState(true, url, server, null);
+                        startNotifier(server, url);
+                    }
                 } catch (Throwable t) {
+                    if (server != null) server.stop();
                     Log.e(TAG, "gagal start server", t);
-                    starting.set(false);
                     // matikan flag "dinyalakan" supaya START_STICKY tidak
                     // menghidupkan service lagi berulang kali saat gagal total
                     prefs().edit().putBoolean("srv_wanted", false).apply();
@@ -132,6 +147,11 @@ public class TermServerService extends Service {
                     new android.os.Handler(getMainLooper()).post(() ->
                             Toast.makeText(this, "Server gagal: " + msg, Toast.LENGTH_LONG).show());
                     stopSelf();
+                } finally {
+                    synchronized (lifecycleLock) {
+                        starting.set(false);
+                        if (destroyed) releaseRootfsLease();
+                    }
                 }
             }, "tty-start").start();
         }
@@ -306,12 +326,23 @@ public class TermServerService extends Service {
         super.onTaskRemoved(rootIntent);
     }
 
+    private void releaseRootfsLease() {
+        if (rootfsLease) { RootfsGuard.endService(); rootfsLease = false; }
+    }
+
     @Override
     public void onDestroy() {
-        if (notifierThread != null) notifierThread.interrupt();
-        WebTerminalServer s = serverRef.getAndSet(null);
-        if (s != null) s.stop();
+        synchronized (lifecycleLock) {
+            destroyed = true;
+            if (notifierThread != null) notifierThread.interrupt();
+            WebTerminalServer s = serverRef.getAndSet(null);
+            if (s != null) s.stop();
+            // Jika Start masih berjalan, thread-nya menutup server hasil Start
+            // dulu sebelum melepas lease. Stop tidak boleh balapan dengan restore.
+            if (!starting.get()) releaseRootfsLease();
+        }
         releaseLocks();
+        broadcastState(false, null, null, null);
         super.onDestroy();
     }
 }

@@ -1,5 +1,6 @@
 import com.linuxbox.distro.Crypto;
 import com.linuxbox.distro.TarUtil;
+import com.linuxbox.distro.RootfsIdentity;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -19,6 +20,8 @@ public final class BackupSmokeTest {
         Files.createDirectories(root.resolve("usr/bin"));
         Files.createDirectories(root.resolve("root/project"));
         Files.createDirectories(root.resolve("empty"));
+        Files.createDirectories(root.resolve("etc"));
+        Files.writeString(root.resolve("etc/os-release"), "ID=ubuntu\nVERSION_ID=\"24.04\"\n");
         Files.write(root.resolve("root/project/notes.txt"), TEXT);
         Files.write(root.resolve("root/project/" + LONG_NAME), TEXT);
         for (int i = 0; i < BINARY.length; i++) BINARY[i] = (byte) (i % 251);
@@ -61,12 +64,24 @@ public final class BackupSmokeTest {
             }
             verify(root); // the input fixture was not modified by either backup
             System.out.println("PASS: wrong passphrase rejected; source contents unchanged");
+            Path cleanup = work.resolve("cleanup");
+            Path outside = work.resolve("outside");
+            Files.createDirectories(cleanup);
+            Files.createDirectories(outside);
+            Files.writeString(outside.resolve("keep"), "do not delete");
+            Files.createSymbolicLink(cleanup.resolve("external"), outside.toAbsolutePath());
+            Files.createSymbolicLink(cleanup.resolve("dangling"), Path.of("missing"));
+            TarUtil.deleteRecursively(cleanup.toFile());
+            check(!Files.exists(cleanup), "staging and dangling links removed");
+            check(Files.readString(outside.resolve("keep")).equals("do not delete"), "cleanup never follows external symlink");
+            System.out.println("PASS: staging cleanup does not follow symlinks");
         } finally {
             Crypto.wipe(pass);
         }
     }
 
     private static void verify(Path root) throws IOException {
+        check("ubuntu-2404".equals(RootfsIdentity.detect(root.toFile())), "restored identity from contents");
         check(Arrays.equals(TEXT, Files.readAllBytes(root.resolve("root/project/notes.txt"))), "project content");
         check(Arrays.equals(TEXT, Files.readAllBytes(root.resolve("root/project/" + LONG_NAME))), "long path content");
         check(Arrays.equals(BINARY, Files.readAllBytes(root.resolve("usr/bin/tool"))), "binary content");

@@ -66,6 +66,8 @@ public class MainActivity extends Activity {
     private Button copyBtn;
     private Button backupBtn;
     private Button restoreBtn;
+    private Button repairBtn;
+    private BackupManager.RestorePlan pendingRestore;
     private EditText portView;
     private CheckBox lanView;
     private CheckBox authView;
@@ -86,7 +88,7 @@ public class MainActivity extends Activity {
                 String url = intent.getStringExtra(TermServerService.EXTRA_URL);
                 String err = intent.getStringExtra(TermServerService.EXTRA_ERROR);
                 int sessions = intent.getIntExtra(TermServerService.EXTRA_SESSIONS, 0);
-                if (url != null) currentUrl = url;
+                if (url != null || !running) currentUrl = url;
                 if (err != null && !err.isEmpty()) {
                     append("!! " + err);
                     showState(false, null, 0);
@@ -172,8 +174,10 @@ public class MainActivity extends Activity {
         row2b.setPadding(0, dp(6), 0, 0);
         backupBtn = button("Backup");
         restoreBtn = button("Restore…");
+        repairBtn = button("Perbaiki distro");
         row2b.addView(backupBtn, lp(1));
         row2b.addView(restoreBtn, lp(1));
+        row2b.addView(repairBtn, lp(1));
         root.addView(row2b);
 
         // ---- opsi ----------------------------------------------------------
@@ -247,6 +251,7 @@ public class MainActivity extends Activity {
         copyBtn.setOnClickListener(v -> copyUrl());
         backupBtn.setOnClickListener(v -> backup());
         restoreBtn.setOnClickListener(v -> pickBackup());
+        repairBtn.setOnClickListener(v -> repairDistro());
 
         showState(false, null, 0);
         refreshInfo();
@@ -496,15 +501,14 @@ public class MainActivity extends Activity {
         return total;
     }
 
-    /** Jalankan pemulihan dari berkas (polos atau terenkripsi) di thread latar. */
+    /** Ekstrak/identifikasi tanpa mengganti rootfs, baru minta konfirmasi tujuan. */
     private void restoreFrom(File file, char[] passphrase) {
-        append("-- restore dari " + file.getName()
-                + (passphrase != null && passphrase.length > 0 ? " (terenkripsi)" : ""));
+        append("-- memeriksa backup " + file.getName());
         busy(() -> {
             try {
-                BackupManager.importRootfs(MainActivity.this, file,
-                        MainActivity.this::append, passphrase);
-                append("-- selesai. Start ulang server untuk memakai rootfs baru.");
+                BackupManager.RestorePlan plan = BackupManager.prepareRestore(this, file,
+                        this::append, passphrase);
+                runOnUiThread(() -> confirmRestore(plan));
             } catch (Throwable t) {
                 append("!! GAGAL: " + t.getMessage());
                 t.printStackTrace();
@@ -513,6 +517,58 @@ public class MainActivity extends Activity {
                 file.delete();
             }
         });
+    }
+
+    private void confirmRestore(BackupManager.RestorePlan plan) {
+        if (isFinishing() || isDestroyed()) {
+            new Thread(plan::close, "restore-cleanup").start();
+            return;
+        }
+        pendingRestore = plan;
+        new android.app.AlertDialog.Builder(this)
+                .setTitle("Pulihkan " + plan.distroId + "?")
+                .setMessage("Identitas dibaca dari isi backup. Tujuan: rootfs-" + plan.distroId
+                        + (plan.replacesExisting
+                        ? "\n\nDistro tujuan sudah ada dan akan diganti. Rootfs sebelumnya disimpan di folder .before-restore dalam data aplikasi."
+                        : "\n\nDistro tujuan belum ada; akan dibuat.")
+                        + "\n\nDistro lain tidak dihapus. Server harus tetap berhenti sampai selesai.")
+                .setNegativeButton("Batal", (d, w) -> discardRestore(plan))
+                .setOnCancelListener(d -> discardRestore(plan))
+                .setPositiveButton("Pulihkan", (d, w) -> {
+                    pendingRestore = null;
+                    busy(() -> {
+                        try {
+                            BackupManager.applyRestore(this, plan, this::append);
+                            refreshInfo();
+                            append("-- selesai. Tekan Start untuk membuka " + plan.distroId + ".");
+                        } catch (Throwable t) {
+                            append("!! GAGAL: " + t.getMessage());
+                        } finally {
+                            plan.close();
+                        }
+                    });
+                }).show();
+    }
+
+    private void discardRestore(BackupManager.RestorePlan plan) {
+        pendingRestore = null;
+        busy(plan::close);
+    }
+
+    private void repairDistro() {
+        new android.app.AlertDialog.Builder(this)
+                .setTitle("Perbaiki identitas distro aktif?")
+                .setMessage("Stop server dulu. Isi os-release akan diperiksa, lalu folder yang salah label dipindahkan tanpa install ulang atau menghapus isinya."
+                        + "\n\nJika distro tujuan sudah ada, perbaikan dibatalkan agar tidak menimpa data.")
+                .setNegativeButton("Batal", null)
+                .setPositiveButton("Perbaiki", (d, w) -> busy(() -> {
+                    try {
+                        BackupManager.repairActiveIdentity(this, this::append);
+                        refreshInfo();
+                    } catch (Throwable t) {
+                        append("!! GAGAL: " + t.getMessage());
+                    }
+                })).show();
     }
 
     /** Minta passphrase untuk backup .lbx, lalu pulihkan. */
@@ -535,6 +591,10 @@ public class MainActivity extends Activity {
     }
 
     private void pickBackup() {
+        if (running) {
+            Toast.makeText(this, "Stop server dulu sebelum restore.", Toast.LENGTH_LONG).show();
+            return;
+        }
         try {
             Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
             i.addCategory(Intent.CATEGORY_OPENABLE);
@@ -628,11 +688,19 @@ public class MainActivity extends Activity {
             startBtn.setEnabled(enabled);
             backupBtn.setEnabled(enabled);
             restoreBtn.setEnabled(enabled);
+            repairBtn.setEnabled(enabled);
         });
     }
 
     private void refreshInfo() {
         runOnUiThread(() -> {
+            String activeId = DistroCatalog.activeId(this);
+            for (int i = 0; i < distroView.getCount(); i++) {
+                Object item = distroView.getItemAtPosition(i);
+                if (item instanceof DistroCatalog.Distro && ((DistroCatalog.Distro) item).id.equals(activeId)) {
+                    distroView.setSelection(i); break;
+                }
+            }
             String info = DistroCatalog.activeId(this) + " · "
                     + ProotSession.detectShell(ProotSession.activeRootfsDir(this));
             metaView.setText(info);
@@ -644,6 +712,9 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        BackupManager.RestorePlan plan = pendingRestore;
+        pendingRestore = null;
+        if (plan != null) new Thread(plan::close, "restore-cleanup").start();
         super.onDestroy();
     }
 

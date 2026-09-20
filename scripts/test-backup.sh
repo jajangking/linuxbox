@@ -13,7 +13,7 @@ bash "$ROOT/scripts/fetch-java-deps.sh" "$WORK/libs"
 mkdir -p "$WORK/classes" "$WORK/missing-lang3" "$WORK/complete"
 SRC="$ROOT/android/app/src/main/java/com/linuxbox/distro"
 javac --release 11 -encoding UTF-8 -cp "$WORK/libs/*" -d "$WORK/classes" \
-    "$SRC/TaskLog.java" "$SRC/TarUtil.java" "$SRC/Crypto.java" \
+    "$SRC/TaskLog.java" "$SRC/TarUtil.java" "$SRC/Crypto.java" "$SRC/RootfsIdentity.java" \
     "$ROOT/tests/java/BackupSmokeTest.java"
 
 # Prove the test exercises the original missing-SystemProperties failure.
