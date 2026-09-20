@@ -88,6 +88,23 @@ dengan pesan yang menyuruh mem-build ulang dengan `lib/arm64-v8a/`.
 `ProotSession.pick()` menerima nama `libproot.so` maupun `proot`, jadi APK yang
 dibangun sebelum penamaan ini berlaku tetap bisa jalan.
 
+### Diagnostik di device
+
+Kalau proot gagal jalan di HP, jalankan skrip ini **dari Termux di HP itu
+sendiri** (bukan dari PC/agent — agent tidak punya akses adb), lalu kirim
+keluarannya:
+
+```bash
+bash scripts/device-diag.sh                       # device tunggal
+bash scripts/device-diag.sh 10.141.58.141:45307   # kalau pakai wireless adb
+```
+
+Skrip itu mengumpulkan: info device + status SELinux, isi `nativeLibraryDir`
+beserta labelnya (`ls -Z`, harus `apk_data_file_t`), kelayakan rootfs, logcat,
+dan — yang terpenting — **tiga varian eksekusi proot** (`TMPDIR=/tmp` vs
+`files/tmp`, dengan dan tanpa `--cwd=/`) supaya kelihatan varian mana yang
+masih mengeluh.
+
 ### Diagnostik helper (opsional)
 
 `ptylauncher` bisa menulis info cwd/`realpath`/`TMPDIR` ke terminal untuk
