@@ -63,6 +63,7 @@ public class MainActivity extends Activity {
     private Button startBtn;
     private Button stopBtn;
     private Button openBtn;
+    private Button nativeBtn;
     private Button copyBtn;
     private Button backupBtn;
     private Button restoreBtn;
@@ -164,8 +165,10 @@ public class MainActivity extends Activity {
         row2.setOrientation(LinearLayout.HORIZONTAL);
         row2.setPadding(0, dp(6), 0, 0);
         openBtn = button("Buka terminal");
+        nativeBtn = button("Terminal native");
         copyBtn = button("Salin URL");
         row2.addView(openBtn, lp(1));
+        row2.addView(nativeBtn, lp(1));
         row2.addView(copyBtn, lp(1));
         root.addView(row2);
 
@@ -248,6 +251,7 @@ public class MainActivity extends Activity {
         startBtn.setOnClickListener(v -> startServer());
         stopBtn.setOnClickListener(v -> stopServer());
         openBtn.setOnClickListener(v -> openTerminal());
+        nativeBtn.setOnClickListener(v -> openNativeTerminal());
         copyBtn.setOnClickListener(v -> copyUrl());
         backupBtn.setOnClickListener(v -> backup());
         restoreBtn.setOnClickListener(v -> pickBackup());
@@ -311,6 +315,7 @@ public class MainActivity extends Activity {
             if (sessions > 0) info += " · " + sessions + " sesi";
             metaView.setText(info);
             openBtn.setEnabled(isRunning);
+            nativeBtn.setEnabled(isRunning);
             copyBtn.setEnabled(url != null);
             stopBtn.setEnabled(isRunning);
         });
@@ -438,6 +443,11 @@ public class MainActivity extends Activity {
             return;
         }
         startActivity(new Intent(this, WebViewActivity.class).putExtra("url", currentUrl));
+    }
+
+    /** Terminal native (Termux TerminalView) — tanpa WebView, menempel ke PTY yang sama. */
+    private void openNativeTerminal() {
+        startActivity(new Intent(this, TermuxTerminalActivity.class));
     }
 
     private void copyUrl() {

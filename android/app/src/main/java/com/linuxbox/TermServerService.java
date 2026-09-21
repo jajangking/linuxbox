@@ -49,8 +49,14 @@ public class TermServerService extends Service {
     /** WakeLock dilepas kalau tidak ada klien selama 5 menit (hemat baterai). */
     private static final long IDLE_RELEASE_MS = 5 * 60 * 1000L;
 
-    private final AtomicReference<WebTerminalServer> serverRef = new AtomicReference<>();
+    private static final AtomicReference<WebTerminalServer> serverRef = new AtomicReference<>();
     private final AtomicBoolean starting = new AtomicBoolean(false);
+
+    /** SessionManager milik server yang sedang berjalan, atau null kalau server mati. */
+    public static com.linuxbox.web.SessionManager sessions() {
+        WebTerminalServer server = serverRef.get();
+        return server != null ? server.sessions() : null;
+    }
 
     private final Object lifecycleLock = new Object();
     private boolean rootfsLease;

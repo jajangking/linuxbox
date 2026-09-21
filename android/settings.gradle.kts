@@ -14,3 +14,4 @@ dependencyResolutionManagement {
 }
 rootProject.name = "LinuxBox"
 include(":app")
+include(":termux-terminal")

@@ -41,6 +41,7 @@ android {
 }
 
 dependencies {
+    implementation(project(":termux-terminal"))
     implementation("org.apache.commons:commons-compress:1.26.2")
     // Eksplisit agar jalur Gradle dan build manual memakai runtime yang sama.
     // Selaraskan juga scripts/fetch-java-deps.sh saat mengganti versi.
