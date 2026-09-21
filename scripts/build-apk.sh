@@ -1,27 +1,34 @@
 #!/bin/bash
 # build-apk.sh — bangun & pasang LinuxBox di Termux tanpa Android Studio/Gradle.
-# Pipeline: proot/rootfs/xterm.js dari Termux -> compile C (NDK cross) ->
+# Pipeline: proot/rootfs dari Termux -> compile C (NDK cross) ->
 #           javac + commons-compress -> d8 -> aapt2 -> apksigner -> adb install.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="$ROOT/android/app/src/main"
+TT_SRC="$ROOT/android/termux-terminal/src/main"
 MANIFEST="$ROOT/android/app/src/main/AndroidManifest.xml"
 WORK="$ROOT/out"
 GEN="$WORK/gen"
 ASSETS="$WORK/assets"
+R_GEN="$WORK/rgen"
+RES_APP="$WORK/res-app.zip"
+RES_TT="$WORK/res-tt.zip"
 DISTRO="${DISTRO:-alpine}"
-XTERM_VER="${XTERM_VER:-6.0.0}"
-FIT_VER="${FIT_VER:-0.11.0}"
 ANDROID_JAR="${ANDROID_JAR:-$HOME/androidjar/android-13/android.jar}"
 AAPT_FRAMEWORK="${AAPT_FRAMEWORK:-/system/framework/framework-res.apk}"
 CC_TARGET="${CC_TARGET:-aarch64-linux-android35}"
 DEX_API="${DEX_API:-26}"
+# androidx.annotation dipakai modul termux-terminal (TerminalView) — compile-time only.
+# Catatan: 1.7.0 sudah jadi KMP (jar-nya metadata, bukan class Android); versi 1.5.0
+# adalah jar polos yang berisi androidx.annotation.RequiresApi. Selaraskan ke koordinat
+# Gradle bila 1.7.0 mulai menerbitkan variant Android yang dimengerti jalur manual.
+ANDROIDX_ANNOTATION_URL="${ANDROIDX_ANNOTATION_URL:-https://dl.google.com/android/maven2/androidx/annotation/annotation/1.5.0/annotation-1.5.0.jar}"
 
 cmds=(javac jar d8 aapt2 apksigner adb curl keytool clang tar sha256sum)
 for c in "${cmds[@]}"; do command -v "$c" >/dev/null || { echo "butuh: $c" >&2; exit 1; }; done
 
-rm -rf "$WORK"; mkdir -p "$GEN" "$ASSETS/bin" "$ASSETS/web" "$WORK/dex" "$WORK/libs" "$WORK/jni/lib/arm64-v8a"
+rm -rf "$WORK"; mkdir -p "$GEN" "$ASSETS/bin" "$WORK/dex" "$WORK/libs" "$WORK/jni/lib/arm64-v8a"
 
 echo "[1] proot binary + libs"
 command -v proot >/dev/null || pkg install -y proot
@@ -97,17 +104,7 @@ tar -C "$ROOTFS_SRC" -czf "$ASSETS/rootfs.tar.gz" .
 SHA=$(sha256sum "$ASSETS/rootfs.tar.gz" | cut -d' ' -f1)
 SIZE=$(stat -c%s "$ASSETS/rootfs.tar.gz")
 
-echo "[4] web assets (xterm.js)"
-curl -fsSL -o "$ASSETS/web/xterm.js"  "https://cdn.jsdelivr.net/npm/@xterm/xterm@$XTERM_VER/lib/xterm.js"
-curl -fsSL -o "$ASSETS/web/xterm.css" "https://cdn.jsdelivr.net/npm/@xterm/xterm@$XTERM_VER/css/xterm.css"
-curl -fsSL -o "$ASSETS/web/fit.js"    "https://cdn.jsdelivr.net/npm/@xterm/addon-fit@$FIT_VER/lib/addon-fit.js"
-for f in xterm.js xterm.css fit.js; do
-    [ -s "$ASSETS/web/$f" ] || { echo "GAGAL: aset web $f kosong/tidak terunduh" >&2; exit 1; }
-done
-grep -q "Terminal" "$ASSETS/web/xterm.js" || { echo "GAGAL: xterm.js bukan bundle UMD" >&2; exit 1; }
-
-echo "[5] index.html + bootstrap.json (sha-inject)"
-cp "$SRC/assets/web/index.html" "$ASSETS/web/index.html"
+echo "[4] bootstrap.json (sha-inject)"
 cat > "$ASSETS/bootstrap.json" <<EOF
 {
   "distro": "$DISTRO",
@@ -118,26 +115,57 @@ EOF
 
 echo "[6] deps"
 bash "$ROOT/scripts/fetch-java-deps.sh" "$WORK/libs"
+echo "  androidx-annotation (compile-time)"
+curl -fsSL --retry 2 -o "$WORK/libs/androidx-annotation.jar" "$ANDROIDX_ANNOTATION_URL"
+if ! jar tf "$WORK/libs/androidx-annotation.jar" 2>/dev/null | grep -q "androidx/annotation/RequiresApi.class"; then
+    echo "GAGAL: androidx.annotation tidak valid (butuh kelas RequiresApi)." >&2
+    exit 1
+fi
 
-echo "[7] javac"
-JAVAS=$(find "$SRC/java" -name '*.java')
-javac --release 11 -cp "$ANDROID_JAR:$WORK/libs/*" -d "$GEN" $JAVAS
-
-echo "[8] d8"
-jar cf "$WORK/classes.jar" -C "$GEN" .
-d8 --min-api "$DEX_API" --output "$WORK/dex" \
-   "$WORK/classes.jar" "$WORK"/libs/*.jar \
-   --lib "$ANDROID_JAR"
-
-echo "[9] aapt2 link (manifest + assets)"
+echo "[7] res (aapt2 compile) + link (aapt2, + R.java)"
+mkdir -p "$R_GEN"
+aapt2 compile --dir "$SRC/res" -o "$RES_APP"
+aapt2 compile --dir "$TT_SRC/res" -o "$RES_TT"
 aapt2 link -o "$WORK/unsigned.apk" \
   --manifest "$MANIFEST" \
   -A "$ASSETS" \
   -I "$AAPT_FRAMEWORK" \
+  -R "$RES_APP" -R "$RES_TT" \
+  --java "$R_GEN" \
   --min-sdk-version "$DEX_API" \
   --target-sdk-version 33 \
   --version-code 1 --version-name 0.1.0 \
   --auto-add-overlay --package-id 0x7f --allow-reserved-package-id
+# Resource modul termux-terminal digabung ke package com.linuxbox oleh link di
+# atas. Kode modul mereferensikannya lewat com.termux.view.R; hasil delegasi
+# (nilai int sama, resolusi runtime memakai tabel resource yang sama).
+mkdir -p "$R_GEN/com/termux/view"
+cat > "$R_GEN/com/termux/view/R.java" <<EOF
+package com.termux.view;
+/** Delegasi ke resource termux-terminal yang sudah digabung ke package com.linuxbox. */
+public final class R {
+    public static final class string {
+        public static final int copy_text = com.linuxbox.R.string.copy_text;
+        public static final int paste_text = com.linuxbox.R.string.paste_text;
+        public static final int text_selection_more = com.linuxbox.R.string.text_selection_more;
+    }
+    public static final class drawable {
+        public static final int text_select_handle_left_material = com.linuxbox.R.drawable.text_select_handle_left_material;
+        public static final int text_select_handle_right_material = com.linuxbox.R.drawable.text_select_handle_right_material;
+    }
+}
+EOF
+
+echo "[8] javac"
+JAVAS=$(find "$SRC/java" "$TT_SRC/java" -name '*.java')
+R_JAVAS=$(find "$R_GEN" -name '*.java')
+javac --release 11 -encoding UTF-8 -cp "$ANDROID_JAR:$WORK/libs/*" -d "$GEN" $JAVAS $R_JAVAS
+
+echo "[9] d8"
+jar cf "$WORK/classes.jar" -C "$GEN" .
+d8 --min-api "$DEX_API" --output "$WORK/dex" \
+   "$WORK/classes.jar" "$WORK"/libs/*.jar \
+   --lib "$ANDROID_JAR"
 
 echo "[10] inject dex + jniLibs"
 (

@@ -2,6 +2,7 @@ package com.linuxbox.web;
 
 import android.content.Context;
 
+import com.linuxbox.Config;
 import com.linuxbox.distro.DistroCatalog;
 import com.linuxbox.distro.ProotSession;
 import com.linuxbox.distro.RootfsGuard;
@@ -196,9 +197,16 @@ public final class SessionManager {
         }
         for (Session s : list()) startSupervisor(s);
         if (sessions.isEmpty()) {
-            try {
-                create("shell 1");
-            } catch (IOException ignored) {
+            // Banyaknya tab awal bisa diatur dari file config (tanpa rebuild).
+            int want = Config.get(ctx).sessions();
+            int made = 0;
+            while (made < want) {
+                try {
+                    create("shell " + (made + 1));
+                    made++;
+                } catch (IOException e) {
+                    break;
+                }
             }
         }
         // Sekali setelah restore/repair, buka distro yang baru dipulihkan lebih
@@ -538,9 +546,17 @@ public final class SessionManager {
                 ? ProotSession.Engine.PROOT
                 : ProotSession.engineFor(nativeLibDir, s.distroId, rootfs);
         s.engine = engine.id;
+        // Bind tambahan: /sdcard (izin) + daftar dari file config (bind.*).
+        List<String> binds = extraBinds(ctx);
+        binds.addAll(Config.get(ctx).binds());
+        // Environment: bawaan proot lalu ditimpa override env.* dari config.
+        java.util.Map<String, String> env = ProotSession.environment(
+                engine, filesDir, nativeLibDir, rootfs);
+        env.putAll(Config.get(ctx).environment());
         return PtyHelper.start(s.id, filesDir, nativeLibDir, rootfs,
-                ProotSession.buildCommand(engine, nativeLibDir, rootfs, extraBinds(ctx)),
-                ProotSession.environment(engine, filesDir, nativeLibDir, rootfs));
+                ProotSession.buildCommand(engine, nativeLibDir, rootfs, binds,
+                        Config.get(ctx).shell()),
+                env);
     }
 
     private void pump(Session s, PtyHelper p) {

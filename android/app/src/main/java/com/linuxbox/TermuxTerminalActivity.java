@@ -1,6 +1,7 @@
 package com.linuxbox;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.BroadcastReceiver;
 import android.content.ClipData;
 import android.content.ClipboardManager;
@@ -16,11 +17,18 @@ import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.Window;
 import android.view.inputmethod.InputMethodManager;
+import android.widget.Button;
 import android.widget.FrameLayout;
+import android.widget.HorizontalScrollView;
+import android.widget.LinearLayout;
 import android.widget.TextView;
 
 import com.linuxbox.web.SessionManager;
+import com.termux.terminal.KeyHandler;
+import com.termux.terminal.TerminalColors;
+import com.termux.terminal.TerminalColorScheme;
 import com.termux.terminal.TerminalEmulator;
 import com.termux.terminal.TerminalSession;
 import com.termux.terminal.TerminalSessionClient;
@@ -29,18 +37,25 @@ import com.termux.view.TerminalViewClient;
 
 import java.io.IOException;
 import java.io.OutputStream;
+import java.util.List;
+import java.util.Map;
+import java.util.Properties;
 
 /**
  * Terminal native (Termux TerminalView) yang menempel langsung ke sesi PTY
- * LinuxBox lewat SessionManager — tanpa WebView/xterm.js.
+ * LinuxBox lewat {@link SessionManager} — tanpa WebView/xterm.js.
  *
- * Alur: service menyimpan WebTerminalServer (yang punya SessionManager) di
+ * Alur: layanan sesi ({@link TermServerService}) menyimpan SessionManager di
  * proses yang sama, jadi activity tinggal mengambil {@link
  * TermServerService#sessions()} dan melampirkan dirinya sebagai
  * {@link SessionManager.Sink}. Termux {@link TerminalSession} dijalankan dalam modus
  * "PTY eksternal" (patch LINUXBOX di modul termux-terminal): input dari
  * pengguna diteruskan ke SessionManager, output PTY dipompa lewat
  * {@link TerminalSession#appendOutput(byte[], int)}.
+ *
+ * Semua hal yang bisa diatur pengguna ada di file config (lihat {@link Config})
+ * supaya berubah TANPA build/install: ukuran font, warna tema, dan susunan
+ * tombol baris bawah.
  */
 public final class TermuxTerminalActivity extends Activity
         implements TerminalSessionClient, TerminalViewClient {
@@ -51,6 +66,11 @@ public final class TermuxTerminalActivity extends Activity
 
     private TerminalView terminalView;
     private TextView statusView;
+    private LinearLayout extraKeys;
+    private LinearLayout sessionBar;
+    private LinearLayout chipsLayout;
+    private Button ctrlKey, altKey;
+    private boolean ctrlOn, altOn;
 
     private SessionManager manager;
     private SessionManager.Session lxSession;
@@ -73,7 +93,7 @@ public final class TermuxTerminalActivity extends Activity
 
         @Override
         public void sendText(String text) {
-            // JSON kontrol hanya untuk client web.
+            // JSON kontrol dulu untuk client web, sekarang tidak dipakai.
         }
 
         @Override
@@ -98,23 +118,42 @@ public final class TermuxTerminalActivity extends Activity
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        requestWindowFeature(Window.FEATURE_NO_TITLE);
         setTitle("Terminal");
 
         FrameLayout root = new FrameLayout(this);
         root.setBackgroundColor(0xFF000000);
 
+        buildSessionBar();
+        FrameLayout.LayoutParams barLp = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(38));
+        barLp.gravity = Gravity.TOP;
+        root.addView(sessionBar, barLp);
+
         terminalView = new TerminalView(this, null);
         terminalView.setVisibility(View.GONE);
-        root.addView(terminalView, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        FrameLayout.LayoutParams tvLp = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT);
+        tvLp.topMargin = dp(38);
+        tvLp.bottomMargin = dp(46);
+        root.addView(terminalView, tvLp);
 
         statusView = new TextView(this);
         statusView.setTextColor(0xFF7C8798);
         statusView.setTextSize(14);
         statusView.setGravity(Gravity.CENTER);
         statusView.setText("Menghubungkan ke terminal...");
-        root.addView(statusView, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        FrameLayout.LayoutParams statusLp = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        statusLp.topMargin = dp(52);
+        statusLp.gravity = Gravity.TOP;
+        root.addView(statusView, statusLp);
+
+        buildExtraKeys();
+        FrameLayout.LayoutParams ekLp = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(46));
+        ekLp.gravity = Gravity.BOTTOM;
+        root.addView(extraKeys, ekLp);
 
         setContentView(root);
 
@@ -129,21 +168,16 @@ public final class TermuxTerminalActivity extends Activity
         }
     }
 
-    /** Server belum jalan: hidupkan dengan setelan terakhir yang disimpan MainActivity. */
+    /** Layanan belum jalan: hidupkan. Sesi dibuat & dikonfigurasi dari file config. */
     private void ensureServerStarted() {
-        android.content.SharedPreferences prefs =
-                getSharedPreferences("linuxbox", MODE_PRIVATE);
-        Intent intent = new Intent(this, TermServerService.class)
-                .putExtra("port", prefs.getInt("port", 8770))
-                .putExtra("lan", prefs.getBoolean("lan", false))
-                .putExtra("auth", prefs.getBoolean("auth", false));
+        Intent intent = new Intent(this, TermServerService.class);
         try {
             startForegroundService(intent);
         } catch (Exception e) {
             try {
                 startService(intent);
             } catch (Exception e2) {
-                showStatus("Tidak bisa memulai server: " + e2.getMessage());
+                showStatus("Tidak bisa memulai layanan terminal: " + e2.getMessage());
             }
         }
     }
@@ -178,9 +212,11 @@ public final class TermuxTerminalActivity extends Activity
 
     private void attachTerminal() {
         terminalView.setTerminalViewClient(this);
-        // Ukuran font skala density (px). Nilai mendekati default Termux (14dp).
-        terminalView.setTextSize(dp(12));
-        terminalView.setBackgroundColor(0xFF000000);
+        terminalView.setFocusable(true);
+        terminalView.setFocusableInTouchMode(true);
+        terminalView.setClickable(true);
+        // Ukuran font & warna bisa diubah dari file config (tanpa rebuild).
+        applyConfig();
 
         // Modus eksternal: emulator menempel ke PTY LinuxBox, bukan anak sendiri.
         terminalSession = new TerminalSession(TRANSCRIPT_ROWS, this);
@@ -192,8 +228,8 @@ public final class TermuxTerminalActivity extends Activity
 
         terminalView.setVisibility(View.VISIBLE);
         statusView.setVisibility(View.GONE);
-        setTitle(lxSession.displayName() + (lxSession.isNative()
-                ? " (native)" : " (" + lxSession.distroId + ")"));
+        updateTitle();
+        refreshSessionBar();
         terminalView.requestFocus();
         mainHandler.post(() -> terminalView.setTerminalCursorBlinkerState(true, true));
     }
@@ -219,7 +255,7 @@ public final class TermuxTerminalActivity extends Activity
 
     /**
      * Dipanggil TerminalView saat emulator siap (size pertama / ukuran berubah).
-     * Lampirkan sink + putar ulang scrollback — urutan sama dengan WebTerminalServer.
+     * Lampirkan sink + putar ulang scrollback.
      */
     @Override
     public void onEmulatorSet() {
@@ -348,12 +384,12 @@ public final class TermuxTerminalActivity extends Activity
 
     @Override
     public boolean readControlKey() {
-        return false;
+        return takeCtrl();
     }
 
     @Override
     public boolean readAltKey() {
-        return false;
+        return takeAlt();
     }
 
     @Override
@@ -445,5 +481,374 @@ public final class TermuxTerminalActivity extends Activity
 
     private int dp(int v) {
         return (int) (v * getResources().getDisplayMetrics().density + 0.5f);
+    }
+
+    // ---------------------------------------------- multi sesi (ala Termux)
+
+    /** Bar tab sesi di atas terminal: chip nama + tutup, plus tombol sesi baru. */
+    private void buildSessionBar() {
+        sessionBar = new LinearLayout(this);
+        sessionBar.setOrientation(LinearLayout.HORIZONTAL);
+        sessionBar.setBackgroundColor(0xFF0B0E13);
+        sessionBar.setPadding(dp(2), dp(4), dp(2), dp(2));
+
+        HorizontalScrollView scroll = new HorizontalScrollView(this);
+        scroll.setHorizontalScrollBarEnabled(false);
+        scroll.setFillViewport(true);
+        sessionBar.addView(scroll, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.MATCH_PARENT, 1f));
+
+        chipsLayout = new LinearLayout(this);
+        chipsLayout.setOrientation(LinearLayout.HORIZONTAL);
+        chipsLayout.setGravity(Gravity.CENTER_VERTICAL);
+        scroll.addView(chipsLayout, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+        Button addBtn = new Button(this);
+        addBtn.setText("+");
+        addBtn.setTextSize(16);
+        addBtn.setAllCaps(false);
+        addBtn.setMinWidth(0);
+        addBtn.setMinHeight(0);
+        addBtn.setTextColor(0xFFD8DEE9);
+        addBtn.setBackgroundColor(0xFF1D2530);
+        addBtn.setFocusable(false);
+        addBtn.setPadding(dp(10), 0, dp(10), 0);
+        addBtn.setOnClickListener(v -> newSession());
+        sessionBar.addView(addBtn, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+        Button menuBtn = new Button(this);
+        menuBtn.setText("\u25C0 Menu");
+        menuBtn.setTextSize(14);
+        menuBtn.setAllCaps(false);
+        menuBtn.setMinWidth(0);
+        menuBtn.setMinHeight(0);
+        menuBtn.setTextColor(0xFFD8DEE9);
+        menuBtn.setBackgroundColor(0xFF1D2530);
+        menuBtn.setFocusable(false);
+        menuBtn.setPadding(dp(8), 0, dp(8), 0);
+        menuBtn.setOnClickListener(v -> goToMenu());
+        sessionBar.addView(menuBtn, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.MATCH_PARENT));
+    }
+
+    private void refreshSessionBar() {
+        if (manager == null || chipsLayout == null) return;
+        chipsLayout.removeAllViews();
+        for (SessionManager.Session s : manager.list()) {
+            chipsLayout.addView(buildSessionChip(s));
+        }
+    }
+
+    private View buildSessionChip(final SessionManager.Session s) {
+        boolean selected = s == lxSession;
+        LinearLayout chip = new LinearLayout(this);
+        chip.setOrientation(LinearLayout.HORIZONTAL);
+        chip.setGravity(Gravity.CENTER_VERTICAL);
+        chip.setBackgroundColor(selected ? 0xFFE69A45 : 0xFF232B38);
+        chip.setPadding(dp(8), 0, dp(2), 0);
+        chip.setFocusable(false);
+        if (!selected) {
+            chip.setOnClickListener(v -> switchTo(s));
+        }
+
+        TextView label = new TextView(this);
+        label.setText(s.displayName());
+        label.setTextSize(12);
+        label.setTextColor(selected ? 0xFF000000 : 0xFFD8DEE9);
+        chip.addView(label, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        TextView close = new TextView(this);
+        close.setText("\u2715");
+        close.setTextSize(14);
+        close.setTextColor(selected ? 0xFF5A3210 : 0xFF9AA5B5);
+        close.setGravity(Gravity.CENTER);
+        close.setFocusable(false);
+        close.setClickable(true);
+        close.setOnClickListener(v -> killSession(s));
+        LinearLayout.LayoutParams closeLp = new LinearLayout.LayoutParams(
+                dp(36), ViewGroup.LayoutParams.MATCH_PARENT);
+        closeLp.setMargins(dp(2), 0, 0, 0);
+        chip.addView(close, closeLp);
+
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, dp(34));
+        lp.setMargins(0, 0, dp(3), 0);
+        chip.setLayoutParams(lp);
+        return chip;
+    }
+
+    /** Buat sesi baru: distro aktif, fallback ke shell native kalau belum ada distro. */
+    private void newSession() {
+        if (manager == null) return;
+        try {
+            switchTo(manager.create(null));
+        } catch (IOException e) {
+            try {
+                switchTo(manager.createNative(null));
+            } catch (IOException e2) {
+                showStatus("Sesi baru gagal: " + e2.getMessage());
+            }
+        }
+    }
+
+    /** Perpindahan sesi: lepas sink lama, pasang sesi baru + replay scrollback. */
+    private void switchTo(SessionManager.Session s) {
+        if (s == null || s == lxSession) return;
+        if (manager != null && lxSession != null && sinkAttached) {
+            manager.detach(lxSession, sink);
+        }
+        sinkAttached = false;
+        lxSession = s;
+        applyConfig();
+        terminalSession = new TerminalSession(TRANSCRIPT_ROWS, this);
+        terminalSession.setExternalOutputStream(guestStdin());
+        terminalSession.setExternalResizeListener(
+                (columns, rows) -> manager.resize(lxSession, rows, columns));
+        terminalView.attachSession(terminalSession);
+        terminalView.requestFocus();
+        updateTitle();
+        refreshSessionBar();
+    }
+
+    private void killSession(final SessionManager.Session s) {
+        if (manager == null) return;
+        new AlertDialog.Builder(this)
+                .setTitle("Tutup sesi")
+                .setMessage("Tutup sesi \"" + s.displayName() + "\"?")
+                .setNegativeButton("Batal", null)
+                .setPositiveButton("Tutup", (d, w) -> removeSession(s))
+                .show();
+    }
+
+    private void removeSession(SessionManager.Session s) {
+        boolean wasCurrent = s == lxSession;
+        manager.kill(s.id);
+        if (!wasCurrent) {
+            refreshSessionBar();
+            return;
+        }
+        List<SessionManager.Session> rest = manager.list();
+        SessionManager.Session next = manager.first();
+        if (next == null && !rest.isEmpty()) next = rest.get(rest.size() - 1);
+        if (next != null) {
+            switchTo(next);
+        } else {
+            try {
+                switchTo(manager.createNative(null));
+            } catch (IOException e) {
+                showStatus("Semua sesi ditutup.");
+                onBackPressed();
+            }
+        }
+    }
+
+    private void updateTitle() {
+        if (lxSession == null) return;
+        setTitle(lxSession.displayName() + (lxSession.isNative()
+                ? " (native)" : " (" + lxSession.distroId + ")"));
+    }
+
+    // ------------------------------------------------- extra keys (ala Termux)
+
+    private void buildExtraKeys() {
+        extraKeys = new LinearLayout(this);
+        extraKeys.setOrientation(LinearLayout.HORIZONTAL);
+        extraKeys.setBackgroundColor(0xFF0E1116);
+        extraKeys.setPadding(dp(2), dp(2), dp(2), dp(2));
+
+        for (String token : Config.get(this).extraKeys()) {
+            addTokenKey(token);
+        }
+    }
+
+    /** Tombol dari config: CTRL/ALT (latch), kode nama, atau satu karakter. */
+    private void addTokenKey(String token) {
+        switch (token) {
+            case "CTRL":
+                ctrlKey = keyButton(token, false);
+                ctrlKey.setOnClickListener(v -> toggleCtrl());
+                extraKeys.addView(ctrlKey, keyLp(1.6f));
+                break;
+            case "ALT":
+                altKey = keyButton(token, false);
+                altKey.setOnClickListener(v -> toggleAlt());
+                extraKeys.addView(altKey, keyLp(1.6f));
+                break;
+            case "ESC":
+                addKeyCodeKey(token, KeyEvent.KEYCODE_ESCAPE);
+                break;
+            case "TAB":
+                addKeyCodeKey(token, KeyEvent.KEYCODE_TAB);
+                break;
+            case "◀": case "LEFT":
+                addKeyCodeKey("◀", KeyEvent.KEYCODE_DPAD_LEFT);
+                break;
+            case "▶": case "RIGHT":
+                addKeyCodeKey("▶", KeyEvent.KEYCODE_DPAD_RIGHT);
+                break;
+            case "▲": case "UP":
+                addKeyCodeKey("▲", KeyEvent.KEYCODE_DPAD_UP);
+                break;
+            case "▼": case "DOWN":
+                addKeyCodeKey("▼", KeyEvent.KEYCODE_DPAD_DOWN);
+                break;
+            default:
+                if (token.length() == 1) {
+                    addCharKey(token, token.charAt(0));
+                } else {
+                    Log.w(TAG, "token tombol tidak dikenal di config: " + token);
+                }
+        }
+    }
+
+    /**
+     * Terapkan tampilan dari file config: ukuran font, warna latar & tema.
+     * Dipanggil sebelum membuat TerminalSession (tema dibaca saat emulator
+     * dibangun), sehingga mengubah file lalu membuka ulang langsung terasa.
+     */
+    private void applyConfig() {
+        Config cfg = Config.get(this);
+        terminalView.setTextSize(dp(cfg.fontSizeDp()));
+        String bg = cfg.background();
+        try {
+            terminalView.setBackgroundColor(bg != null
+                    ? android.graphics.Color.parseColor(bg) : 0xFF000000);
+        } catch (IllegalArgumentException ignored) {
+            terminalView.setBackgroundColor(0xFF000000);
+        }
+        Map<String, String> theme = cfg.theme();
+        if (theme.isEmpty()) return;
+        Properties p = new Properties();
+        for (Map.Entry<String, String> e : theme.entrySet()) {
+            if (validateColor(e.getValue())) p.setProperty(e.getKey(), e.getValue());
+        }
+        if (p.isEmpty()) return;
+        try {
+            TerminalColors.COLOR_SCHEME.updateWith(p);
+            TerminalColorScheme scheme = TerminalColors.COLOR_SCHEME;
+            scheme.setCursorColorForBackground();
+        } catch (Exception ignored) {
+        }
+    }
+
+    private static boolean validateColor(String v) {
+        return v != null && v.startsWith("#") && (v.length() == 7);
+    }
+
+    private void toggleCtrl() {
+        ctrlOn = !ctrlOn;
+        paintToggle(ctrlKey, ctrlOn);
+    }
+
+    private void toggleAlt() {
+        altOn = !altOn;
+        paintToggle(altKey, altOn);
+    }
+
+    /** Ambil kondisi CTRL dan langsung lepas (latch) supaya tidak tersangkut ON. */
+    private boolean takeCtrl() {
+        boolean v = ctrlOn;
+        if (v) consumeMods();
+        return v;
+    }
+
+    private boolean takeAlt() {
+        boolean v = altOn;
+        if (v) consumeMods();
+        return v;
+    }
+
+    /** Lepas semua toggle modifier setelah satu karakter dipakai (ala Termux). */
+    private void consumeMods() {
+        boolean any = ctrlOn || altOn;
+        ctrlOn = false;
+        altOn = false;
+        if (any) {
+            paintToggle(ctrlKey, false);
+            paintToggle(altKey, false);
+        }
+    }
+
+    private void addCharKey(final String label, final char c) {
+        Button b = keyButton(label, true);
+        b.setOnClickListener(v -> {
+            terminalView.inputCodePoint(c, ctrlOn, altOn);
+            if (ctrlOn || altOn) consumeMods();
+        });
+        extraKeys.addView(b, keyLp());
+    }
+
+    private void addKeyCodeKey(final String label, final int keyCode) {
+        Button b = keyButton(label, true);
+        b.setOnClickListener(v -> {
+            terminalView.handleKeyCode(keyCode, keyMods());
+            if (ctrlOn || altOn) consumeMods();
+        });
+        extraKeys.addView(b, keyLp());
+    }
+
+    private int keyMods() {
+        int mod = 0;
+        if (ctrlOn) mod |= KeyHandler.KEYMOD_CTRL;
+        if (altOn) mod |= KeyHandler.KEYMOD_ALT;
+        return mod;
+    }
+
+    private Button keyButton(String label, boolean plain) {
+        Button b = new Button(this);
+        b.setText(label);
+        b.setAllCaps(false);
+        b.setMinWidth(0);
+        b.setMinHeight(0);
+        b.setTextSize(13);
+        b.setTextColor(0xFFD8DEE9);
+        b.setBackgroundColor(plain ? 0xFF1D2530 : 0xFF232B38);
+        b.setPadding(dp(4), 0, dp(4), 0);
+        return b;
+    }
+
+    private void paintToggle(Button b, boolean on) {
+        if (on) {
+            b.setTextColor(0xFF000000);
+            b.setBackgroundColor(0xFFE69A45);
+        } else {
+            b.setTextColor(0xFFD8DEE9);
+            b.setBackgroundColor(0xFF232B38);
+        }
+    }
+
+    private LinearLayout.LayoutParams keyLp(float w) {
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.MATCH_PARENT, w);
+        lp.setMargins(dp(1), 0, dp(1), 0);
+        return lp;
+    }
+
+    private LinearLayout.LayoutParams keyLp() {
+        return keyLp(1f);
+    }
+
+    @Override
+    public void onBackPressed() {
+        InputMethodManager imm = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+        // Kalau keyboard sedang terbuka, Back pertama menutupnya. hideSoftInput
+        // mengembalikan true hanya kalau ada keyboard yang benar-benar ditutup,
+        // jadi tidak pernah "menelan" Back padahal keyboard sudah hilang.
+        if (imm != null && imm.hideSoftInputFromWindow(
+                getWindow().getDecorView().getWindowToken(), 0)) {
+            return;
+        }
+        // Tanpa keyboard: tutup terminal (finish). MainActivity (menu) ada di
+        // bawahnya di task yang sama, jadi Back otomatis kembali ke menu;
+        // sesi tetap hidup di layanan. Dari menu, Back = minimize.
+        finish();
+    }
+
+    /** Tombol "◀ Menu": kembali ke halaman utama; sesi tetap hidup. */
+    private void goToMenu() {
+        finish();
     }
 }

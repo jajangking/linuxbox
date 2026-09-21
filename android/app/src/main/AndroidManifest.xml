@@ -34,13 +34,8 @@
         </activity>
 
         <activity
-            android:name=".WebViewActivity"
-            android:windowSoftInputMode="adjustResize"
-            android:exported="false" />
-
-        <activity
             android:name=".TermuxTerminalActivity"
-            android:windowSoftInputMode="adjustResize"
+            android:windowSoftInputMode="stateAlwaysHidden|adjustResize"
             android:exported="false" />
 
         <service

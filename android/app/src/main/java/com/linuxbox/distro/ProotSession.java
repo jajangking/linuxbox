@@ -255,7 +255,21 @@ public final class ProotSession {
      */
     public static List<String> buildCommand(Engine engine, String nativeLibDir, File rootfs,
                                             List<String> extraBind) {
-        if (engine == Engine.PROROOT) return prorootCommand(nativeLibDir, rootfs, extraBind);
+        return buildCommand(engine, nativeLibDir, rootfs, extraBind, null);
+    }
+
+    /**
+     * Seperti {@link #buildCommand(Engine, String, File, List)} tetapi dengan
+     * override shell (path di dalam rootfs). shell null/kosong = otomatis
+     * {@link #detectShell(File)} — dipakai supaya pengaturan shell dari file
+     * config (tanpa rebuild) bisa mengubah shell yang dijalankan sesi.
+     */
+    public static List<String> buildCommand(Engine engine, String nativeLibDir, File rootfs,
+                                            List<String> extraBind, String shellOverride) {
+        String shell = (shellOverride != null && !shellOverride.trim().isEmpty())
+                ? shellOverride.trim() : detectShell(rootfs);
+        if (engine == Engine.PROROOT)
+            return prorootCommand(nativeLibDir, rootfs, extraBind, shell);
         List<String> cmd = new ArrayList<>();
         cmd.add(prootBin(nativeLibDir).getAbsolutePath());
         cmd.add("--rootfs=" + rootfs.getAbsolutePath());
@@ -279,7 +293,7 @@ public final class ProotSession {
         // dan realpath() di beberapa ROM (f2fs/Transsion) mengembalikan "/" untuk
         // path data app -> "can't chdir(.../rootfs/./.)" lalu execve gagal.
         cmd.add("--cwd=/");
-        cmd.add(detectShell(rootfs));
+        cmd.add(shell);
         cmd.add("-l");
         return cmd;
     }
@@ -301,7 +315,7 @@ public final class ProotSession {
      * proroot juga tidak punya --kill-on-exit, dan direktori kerja memakai -w.
      */
     private static List<String> prorootCommand(String nativeLibDir, File rootfs,
-                                               List<String> extraBind) {
+                                               List<String> extraBind, String shell) {
         List<String> cmd = new ArrayList<>();
         cmd.add(prorootBin(nativeLibDir).getAbsolutePath());
         cmd.add("-r"); cmd.add(rootfs.getAbsolutePath());
@@ -313,7 +327,7 @@ public final class ProotSession {
             }
         }
         cmd.add("-w"); cmd.add("/root");
-        cmd.add(detectShell(rootfs));
+        cmd.add(shell);
         cmd.add("-l");
         return cmd;
     }
